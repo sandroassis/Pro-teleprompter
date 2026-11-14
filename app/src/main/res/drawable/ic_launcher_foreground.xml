@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Soft drop shadow behind teleprompter monitor -->
+    <path
+        android:fillColor="#55000000"
+        android:pathData="M28,26h52c3.3,0 6,2.7 6,6v46c0,3.3 -2.7,6 -6,6H28c-3.3,0 -6,-2.7 -6,-6V32C22,28.7 24.7,26 28,26z" />
+
+    <!-- Teleprompter Beam-Splitter Frame -->
+    <path
+        android:pathData="M28,24h52c3.3,0 6,2.7 6,6v44c0,3.3 -2.7,6 -6,6H28c-3.3,0 -6,-2.7 -6,-6V30C22,26.7 24.7,24 28,24z"
+        android:strokeWidth="2.5"
+        android:strokeColor="#38BDF8">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="54"
+                android:endY="80"
+                android:startX="54"
+                android:startY="24"
+                android:type="linear">
+                <item
+                    android:color="#152238"
+                    android:offset="0.0" />
+                <item
+                    android:color="#090D16"
+                    android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Subtle Camera Lens Ring in Center Background -->
+    <path
+        android:fillColor="#1838BDF8"
+        android:pathData="M54,52m-14,0a14,14 0,1 1,28 0a14,14 0,1 1,-28 0"
+        android:strokeWidth="1.5"
+        android:strokeColor="#4438BDF8" />
+
+    <!-- Eye-Line Focus Guide Band -->
+    <path
+        android:fillColor="#2938BDF8"
+        android:pathData="M24,44h60v14h-60z" />
+
+    <!-- Left Eye-Line Play Pointer (Amber) -->
+    <path
+        android:fillColor="#FBBF24"
+        android:pathData="M25,47l6,4l-6,4z" />
+
+    <!-- Right Eye-Line Play Pointer (Amber) -->
+    <path
+        android:fillColor="#FBBF24"
+        android:pathData="M83,47l-6,4l6,4z" />
+
+    <!-- Top Dimmed Script Lines -->
+    <path
+        android:fillColor="#7794A3B8"
+        android:pathData="M34,32h28c1.1,0 2,0.9 2,2s-0.9,2 -2,2H34c-1.1,0 -2,-0.9 -2,-2S32.9,32 34,32z" />
+    <path
+        android:fillColor="#7794A3B8"
+        android:pathData="M34,38h38c1.1,0 2,0.9 2,2s-0.9,2 -2,2H34c-1.1,0 -2,-0.9 -2,-2S32.9,38 34,38z" />
+
+    <!-- Active Highlighted Script Lines in Eye-Line -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M34,46.5h40c1.2,0 2.2,1 2.2,2.2s-1,2.2 -2.2,2.2H34c-1.2,0 -2.2,-1 -2.2,-2.2S32.8,46.5 34,46.5z" />
+    <path
+        android:fillColor="#FBBF24"
+        android:pathData="M34,53h26c1.2,0 2.2,1 2.2,2.2s-1,2.2 -2.2,2.2H34c-1.2,0 -2.2,-1 -2.2,-2.2S32.8,53 34,53z" />
+
+    <!-- Bottom Upcoming Script Lines -->
+    <path
+        android:fillColor="#99CBD5E1"
+        android:pathData="M34,62h34c1.1,0 2,0.9 2,2s-0.9,2 -2,2H34c-1.1,0 -2,-0.9 -2,-2S32.9,62 34,62z" />
+    <path
+        android:fillColor="#6694A3B8"
+        android:pathData="M34,68h22c1.1,0 2,0.9 2,2s-0.9,2 -2,2H34c-1.1,0 -2,-0.9 -2,-2S32.9,68 34,68z" />
+
+    <!-- REC Indicator Red Dot (Top Left of Monitor) -->
+    <path
+        android:fillColor="#EF4444"
+        android:pathData="M30,30m-2.6,0a2.6,2.6 0,1 1,5.2 0a2.6,2.6 0,1 1,-5.2 0" />
+
+    <!-- Gemini AI 4-Point Sparkle Badge (Top Right of Monitor) -->
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M76,27 C76,31.5 76.5,32 81,32 C76.5,32 76,32.5 76,37 C76,32.5 75.5,32 71,32 C75.5,32 76,31.5 76,27 Z" />
+    <path
+        android:fillColor="#FBBF24"
+        android:pathData="M81,24 C81,26 81.3,26.3 83.3,26.3 C81.3,26.3 81,26.6 81,28.6 C81,26.6 80.7,26.3 78.7,26.3 C80.7,26.3 81,26 81,24 Z" />
+
+    <!-- Studio Tripod / Rig Pedestal Base -->
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M51,80h6v6h-6z" />
+    <path
+        android:fillColor="#94A3B8"
+        android:pathData="M40,86h28c1.1,0 2,0.9 2,2s-0.9,2 -2,2H40c-1.1,0 -2,-0.9 -2,-2S38.9,86 40,86z" />
+</vector>
