@@ -1,12 +1,21 @@
 package com.example.proteleprompter.ai
 
-import android.app.Activity
+import android.Manifest
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -36,6 +45,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
@@ -52,6 +62,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -63,21 +74,190 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.core.content.ContextCompat
 import com.example.proteleprompter.ui.theme.BroadcastAmber
 import com.example.proteleprompter.ui.theme.BroadcastCyan
 import com.example.proteleprompter.ui.theme.BroadcastGreen
-import com.example.proteleprompter.ui.theme.BroadcastPurple
+import com.example.proteleprompter.ui.theme.BroadcastRed
 import com.example.proteleprompter.ui.theme.StudioBlack
 import com.example.proteleprompter.ui.theme.StudioBorder
 import com.example.proteleprompter.ui.theme.StudioCard
 import com.example.proteleprompter.ui.theme.StudioSurface
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.util.Locale
+
+/**
+ * Continuous microphone controller that keeps SpeechRecognizer active across pauses and silences
+ * until the user explicitly clicks the microphone button to stop.
+ */
+private class ContinuousAiMicController(
+    private val context: Context,
+    private val onTextUpdated: (String) -> Unit
+) {
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var speechRecognizer: SpeechRecognizer? = null
+    private var committedBaseText: String = ""
+    private var latestPartialSegment: String = ""
+
+    private val _isMicActive = MutableStateFlow(false)
+    val isMicActive: StateFlow<Boolean> = _isMicActive.asStateFlow()
+
+    fun startContinuousListening(existingTextInField: String) {
+        committedBaseText = existingTextInField.trim()
+        latestPartialSegment = ""
+        _isMicActive.value = true
+        mainHandler.post { startNextRecognizerCycle() }
+    }
+
+    fun syncManualEdit(newText: String) {
+        if (!_isMicActive.value) {
+            committedBaseText = newText
+        }
+    }
+
+    fun stopContinuousListening() {
+        if (!_isMicActive.value && speechRecognizer == null) return
+        _isMicActive.value = false
+        mainHandler.removeCallbacksAndMessages(null)
+        if (latestPartialSegment.isNotBlank()) {
+            committedBaseText = combineText(committedBaseText, latestPartialSegment)
+            latestPartialSegment = ""
+            onTextUpdated(committedBaseText)
+        }
+        try {
+            speechRecognizer?.stopListening()
+            speechRecognizer?.cancel()
+            speechRecognizer?.destroy()
+        } catch (_: Exception) {
+        }
+        speechRecognizer = null
+    }
+
+    private fun startNextRecognizerCycle() {
+        if (!_isMicActive.value) return
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+            _isMicActive.value = false
+            return
+        }
+
+        try {
+            speechRecognizer?.destroy()
+            val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
+            speechRecognizer = recognizer
+
+            recognizer.setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) {}
+                override fun onBeginningOfSpeech() {}
+                override fun onRmsChanged(rmsdB: Float) {}
+                override fun onBufferReceived(buffer: ByteArray?) {}
+
+                override fun onEndOfSpeech() {
+                    // Do not stop! Wait for onResults or onError to commit and auto-restart.
+                }
+
+                override fun onError(error: Int) {
+                    if (!_isMicActive.value) return
+                    // If user paused speaking after a partial phrase, preserve what was heard so far
+                    if (latestPartialSegment.isNotBlank()) {
+                        committedBaseText = combineText(committedBaseText, latestPartialSegment)
+                        latestPartialSegment = ""
+                        onTextUpdated(committedBaseText)
+                    }
+                    // Immediately restart listening so pauses never turn off the microphone
+                    scheduleRestartCycle(180L)
+                }
+
+                override fun onResults(results: Bundle?) {
+                    if (!_isMicActive.value) return
+                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    val finalSegment = matches?.firstOrNull()?.trim().orEmpty()
+                    val segmentToCommit = finalSegment.ifBlank { latestPartialSegment }
+
+                    if (segmentToCommit.isNotBlank()) {
+                        committedBaseText = combineText(committedBaseText, segmentToCommit)
+                        latestPartialSegment = ""
+                        onTextUpdated(committedBaseText)
+                    }
+                    // Keep listening continuously until user taps the mic button to finish
+                    scheduleRestartCycle(120L)
+                }
+
+                override fun onPartialResults(partialResults: Bundle?) {
+                    if (!_isMicActive.value) return
+                    val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    val partial = matches?.firstOrNull()?.trim().orEmpty()
+                    if (partial.isNotBlank()) {
+                        latestPartialSegment = partial
+                        onTextUpdated(combineText(committedBaseText, partial))
+                    }
+                }
+
+                override fun onEvent(eventType: Int, params: Bundle?) {}
+            })
+
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(
+                    RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                    RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                )
+                putExtra(
+                    RecognizerIntent.EXTRA_LANGUAGE,
+                    Locale.forLanguageTag("pt-BR").toLanguageTag()
+                )
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                // Extend silence thresholds so natural pauses don't cut off phrases prematurely
+                putExtra(
+                    RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS,
+                    15000L
+                )
+                putExtra(
+                    RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS,
+                    15000L
+                )
+                putExtra(
+                    RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS,
+                    15000L
+                )
+            }
+
+            recognizer.startListening(intent)
+        } catch (_: Exception) {
+            if (_isMicActive.value) {
+                scheduleRestartCycle(400L)
+            }
+        }
+    }
+
+    private fun scheduleRestartCycle(delayMs: Long) {
+        if (!_isMicActive.value) return
+        mainHandler.removeCallbacksAndMessages(null)
+        mainHandler.postDelayed({
+            if (_isMicActive.value) {
+                startNextRecognizerCycle()
+            }
+        }, delayMs)
+    }
+
+    private fun combineText(base: String, addition: String): String {
+        val cleanBase = base.trim()
+        val cleanAdd = addition.trim()
+        return when {
+            cleanBase.isEmpty() -> cleanAdd
+            cleanAdd.isEmpty() -> cleanBase
+            else -> "$cleanBase $cleanAdd"
+        }
+    }
+}
 
 @Composable
 fun GeminiAssistantDialog(
@@ -120,6 +300,7 @@ fun GeminiAssistantPanel(
     onClose: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val status by assistant.status.collectAsState()
     val downloadProgress by assistant.downloadProgressText.collectAsState()
@@ -128,6 +309,27 @@ fun GeminiAssistantPanel(
 
     var inputPrompt by remember { mutableStateOf("") }
     var isGenerating by remember { mutableStateOf(false) }
+
+    val micController = remember(context) {
+        ContinuousAiMicController(context) { liveDictatedText ->
+            inputPrompt = liveDictatedText
+        }
+    }
+    val isMicActive by micController.isMicActive.collectAsState()
+
+    val audioPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            micController.startContinuousListening(inputPrompt)
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            micController.stopContinuousListening()
+        }
+    }
 
     LaunchedEffect(Unit) {
         assistant.initializeModel()
@@ -139,20 +341,27 @@ fun GeminiAssistantPanel(
         }
     }
 
-    val voiceInputLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            val spoken = result.data
-                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                ?.firstOrNull()
-            if (!spoken.isNullOrBlank()) {
-                inputPrompt = spoken
+    fun toggleMicrophone() {
+        if (isMicActive) {
+            micController.stopContinuousListening()
+        } else {
+            val hasPermission = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+
+            if (hasPermission) {
+                micController.startContinuousListening(inputPrompt)
+            } else {
+                audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             }
         }
     }
 
     fun submitPrompt(promptText: String) {
+        if (isMicActive) {
+            micController.stopContinuousListening()
+        }
         val clean = promptText.trim()
         if (clean.isEmpty() || isGenerating) return
         inputPrompt = ""
@@ -311,57 +520,89 @@ fun GeminiAssistantPanel(
             }
         }
 
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(6.dp))
 
-        // Natural-Language Chat Input + Voice Dictation + Send Button
+        // Active Continuous Microphone Banner
+        AnimatedVisibility(visible = isMicActive) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(BroadcastRed.copy(alpha = 0.20f))
+                    .border(1.dp, BroadcastRed, RoundedCornerShape(10.dp))
+                    .clickable { toggleMicrophone() }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Mic,
+                        contentDescription = null,
+                        tint = BroadcastRed,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "Microfone ativo (escuta contínua mesmo em pausas) • Toque no microfone para finalizar",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        }
+
+        // Natural-Language Chat Input + Continuous Voice Dictation Toggle + Send Button
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             IconButton(
-                onClick = {
-                    try {
-                        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                            putExtra(
-                                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-                            )
-                            putExtra(
-                                RecognizerIntent.EXTRA_LANGUAGE,
-                                Locale.forLanguageTag("pt-BR").toLanguageTag()
-                            )
-                            putExtra(
-                                RecognizerIntent.EXTRA_PROMPT,
-                                "Fale o que deseja no seu roteiro..."
-                            )
-                        }
-                        voiceInputLauncher.launch(intent)
-                    } catch (_: Exception) {
-                    }
-                },
+                onClick = { toggleMicrophone() },
                 modifier = Modifier
-                    .size(44.dp)
+                    .size(46.dp)
                     .clip(CircleShape)
-                    .background(StudioCard)
+                    .background(if (isMicActive) BroadcastRed else StudioCard)
+                    .border(
+                        width = 1.5.dp,
+                        color = if (isMicActive) Color.White else BroadcastAmber.copy(alpha = 0.5f),
+                        shape = CircleShape
+                    )
             ) {
                 Icon(
-                    Icons.Default.Mic,
-                    contentDescription = "Falar com a IA",
-                    tint = BroadcastAmber
+                    imageVector = if (isMicActive) Icons.Default.Stop else Icons.Default.Mic,
+                    contentDescription = if (isMicActive) {
+                        "Finalizar Microfone"
+                    } else {
+                        "Ativar Microfone Contínuo"
+                    },
+                    tint = if (isMicActive) Color.White else BroadcastAmber
                 )
             }
 
             OutlinedTextField(
                 value = inputPrompt,
-                onValueChange = { inputPrompt = it },
+                onValueChange = {
+                    inputPrompt = it
+                    micController.syncManualEdit(it)
+                },
                 placeholder = {
                     Text(
-                        "Converse com a IA (ex: 'Crie um vídeo sobre finanças')...",
+                        if (isMicActive) {
+                            "Ouvindo continuamente... fale no seu ritmo e clique no microfone para parar"
+                        } else {
+                            "Converse com a IA (ex: 'Crie um vídeo sobre finanças')..."
+                        },
                         fontSize = 13.sp
                     )
                 },
-                maxLines = 3,
+                maxLines = 4,
                 shape = RoundedCornerShape(14.dp),
                 modifier = Modifier.weight(1f)
             )
@@ -491,4 +732,3 @@ private fun ChatBubbleItem(
         }
     }
 }
-
