@@ -47,18 +47,22 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -107,6 +111,10 @@ import com.example.proteleprompter.ui.theme.StudioBlack
 import com.example.proteleprompter.ui.theme.StudioBorder
 import com.example.proteleprompter.ui.theme.StudioCard
 import com.example.proteleprompter.ui.theme.StudioSurface
+import com.example.proteleprompter.update.AppUpdateManager
+import com.example.proteleprompter.update.DownloadProgress
+import com.example.proteleprompter.update.UpdateCheckResult
+import java.io.File
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -932,14 +940,97 @@ fun StudioSettingsScreen(
 fun AboutScreen(
     onBack: () -> Unit
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
     val windowInfo = rememberAdaptiveWindowInfo()
+
+    val installedVersion = remember { AppUpdateManager.getInstalledVersion(context) }
+    var isCheckingUpdate by remember { mutableStateOf(false) }
+    var checkResult by remember { mutableStateOf<UpdateCheckResult?>(null) }
+
+    var isDownloading by remember { mutableStateOf(false) }
+    var downloadProgress by remember { mutableStateOf<DownloadProgress?>(null) }
+    var downloadedApkFile by remember { mutableStateOf<File?>(null) }
+    var needsInstallPermission by remember { mutableStateOf(false) }
+
+    fun triggerUpdateCheck(showFeedback: Boolean = false) {
+        if (isCheckingUpdate) return
+        scope.launch {
+            isCheckingUpdate = true
+            val result = AppUpdateManager.checkForUpdates(context)
+            checkResult = result
+            isCheckingUpdate = false
+            if (showFeedback) {
+                when (result) {
+                    is UpdateCheckResult.Success -> {
+                        if (result.hasUpdate) {
+                            snackbarHostState.showSnackbar(
+                                "Nova versão ${result.remoteVersion.versionName} (Build ${result.remoteVersion.versionCode}) encontrada!"
+                            )
+                        } else {
+                            snackbarHostState.showSnackbar(
+                                "Você já está na versão mais recente (${result.localVersion.versionName})."
+                            )
+                        }
+                    }
+                    is UpdateCheckResult.Error -> {
+                        snackbarHostState.showSnackbar(result.message)
+                    }
+                }
+            }
+        }
+    }
+
+    fun startDownloadAndInstall(apkUrl: String) {
+        if (isDownloading) return
+        scope.launch {
+            isDownloading = true
+            downloadProgress = DownloadProgress(fraction = 0f, downloadedBytes = 0L, totalBytes = 0L)
+            val result = AppUpdateManager.downloadUpdateApk(
+                context = context,
+                apkUrl = apkUrl,
+                onProgress = { progress ->
+                    downloadProgress = progress
+                }
+            )
+            isDownloading = false
+            result.onSuccess { apkFile ->
+                downloadedApkFile = apkFile
+                if (AppUpdateManager.canInstallApkDirectly(context)) {
+                    needsInstallPermission = false
+                    AppUpdateManager.launchApkInstaller(context, apkFile)
+                        .onFailure { err ->
+                            snackbarHostState.showSnackbar(
+                                "Erro ao abrir instalador: ${err.localizedMessage ?: "tente novamente"}"
+                            )
+                        }
+                } else {
+                    needsInstallPermission = true
+                    snackbarHostState.showSnackbar(
+                        "Autorize a instalação de atualizações nas configurações e toque em Instalar Agora."
+                    )
+                    AppUpdateManager.openInstallUnknownAppsSettings(context)
+                }
+            }.onFailure { err ->
+                snackbarHostState.showSnackbar(
+                    "Falha ao baixar atualização: ${err.localizedMessage ?: "verifique sua conexão"}"
+                )
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        triggerUpdateCheck(showFeedback = false)
+    }
 
     Scaffold(
         containerColor = StudioBlack,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             DedicatedScreenTopBar(
                 title = "Sobre o Aplicativo",
-                subtitle = "Informações da versão, arquitetura e créditos de desenvolvimento",
+                subtitle = "Versão, atualizações automáticas e créditos de desenvolvimento",
                 icon = Icons.Default.Info,
                 iconTint = BroadcastAmber,
                 onBack = onBack
@@ -999,11 +1090,327 @@ fun AboutScreen(
                         border = androidx.compose.foundation.BorderStroke(1.dp, BroadcastAmber)
                     ) {
                         Text(
-                            text = "Versão 1.0.0 (Build 100 • Edição Profissional)",
+                            text = "Versão ${installedVersion.versionName} (Build ${installedVersion.versionCode} • Edição Profissional)",
                             style = MaterialTheme.typography.labelMedium,
                             fontWeight = FontWeight.ExtraBold,
                             color = BroadcastAmber,
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                        )
+                    }
+                }
+            }
+
+            // Central de Atualizações OTA (In-App Auto-Updater via GitHub)
+            val successResult = checkResult as? UpdateCheckResult.Success
+            val hasNewUpdate = successResult?.hasUpdate == true
+            val updateBorderColor = when {
+                hasNewUpdate -> BroadcastGreen
+                checkResult is UpdateCheckResult.Error -> BroadcastAmber
+                else -> BroadcastCyan.copy(alpha = 0.6f)
+            }
+
+            Card(
+                colors = CardDefaults.cardColors(containerColor = StudioSurface),
+                shape = RoundedCornerShape(18.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(1.5.dp, updateBorderColor, RoundedCornerShape(18.dp))
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier
+                                    .size(42.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(
+                                        if (hasNewUpdate) {
+                                            BroadcastGreen.copy(alpha = 0.18f)
+                                        } else {
+                                            BroadcastCyan.copy(alpha = 0.18f)
+                                        }
+                                    )
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.SystemUpdate,
+                                    contentDescription = null,
+                                    tint = if (hasNewUpdate) BroadcastGreen else BroadcastCyan,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    text = "Central de Atualizações do App",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = when {
+                                        isCheckingUpdate -> "Consultando servidor oficial no GitHub..."
+                                        hasNewUpdate -> "🚀 Nova versão disponível para instalar!"
+                                        checkResult is UpdateCheckResult.Success -> "✅ Seu aplicativo está na versão mais recente"
+                                        checkResult is UpdateCheckResult.Error -> "Toque para verificar novas versões online"
+                                        else -> "Verificação automática de novas versões"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (hasNewUpdate) BroadcastGreen else Color(0xFF94A3B8),
+                                    fontWeight = if (hasNewUpdate) FontWeight.Bold else FontWeight.Normal
+                                )
+                            }
+                        }
+
+                        IconButton(
+                            onClick = { triggerUpdateCheck(showFeedback = true) },
+                            enabled = !isCheckingUpdate && !isDownloading
+                        ) {
+                            if (isCheckingUpdate) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp,
+                                    color = BroadcastCyan
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = "Verificar Atualizações",
+                                    tint = BroadcastCyan
+                                )
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = StudioBorder)
+
+                    // Version comparison details
+                    TechInfoRow(
+                        label = "Versão Instalada no Celular",
+                        value = "v${installedVersion.versionName} (Build ${installedVersion.versionCode})"
+                    )
+                    if (successResult != null) {
+                        val remote = successResult.remoteVersion
+                        TechInfoRow(
+                            label = "Última Versão no Servidor",
+                            value = "v${remote.versionName} (Build ${remote.versionCode})" +
+                                if (remote.latestCommitSha.isNotBlank()) " • #${remote.latestCommitSha}" else ""
+                        )
+                        if (remote.latestCommitMessage.isNotBlank()) {
+                            Surface(
+                                color = StudioBlack,
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .border(1.dp, StudioBorder, RoundedCornerShape(10.dp))
+                            ) {
+                                Column(modifier = Modifier.padding(10.dp)) {
+                                    Text(
+                                        text = "NOVIDADES DA ÚLTIMA VERSÃO:",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = BroadcastAmber
+                                    )
+                                    Spacer(Modifier.height(2.dp))
+                                    Text(
+                                        text = remote.latestCommitMessage,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color.White
+                                    )
+                                }
+                            }
+                        } else if (remote.releaseNotes.isNotBlank()) {
+                            Text(
+                                text = remote.releaseNotes,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFFCBD5E1)
+                            )
+                        }
+                    } else if (checkResult is UpdateCheckResult.Error) {
+                        Text(
+                            text = (checkResult as UpdateCheckResult.Error).message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = BroadcastAmber
+                        )
+                    }
+
+                    // Active Download Progress Bar
+                    if (isDownloading) {
+                        val progress = downloadProgress
+                        val fraction = progress?.fraction ?: -1f
+                        val downloadedMb = (progress?.downloadedBytes ?: 0L) / (1024f * 1024f)
+                        val totalMb = (progress?.totalBytes ?: 0L) / (1024f * 1024f)
+
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = "Baixando nova versão do Pro Teleprompter...",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = BroadcastCyan,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = if (fraction >= 0f && totalMb > 0f) {
+                                        "${(fraction * 100).roundToInt()}% (%.1f / %.1f MB)".format(downloadedMb, totalMb)
+                                    } else {
+                                        "%.1f MB baixados".format(downloadedMb)
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = BroadcastAmber,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            if (fraction >= 0f) {
+                                LinearProgressIndicator(
+                                    progress = { fraction },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(8.dp)
+                                        .clip(RoundedCornerShape(4.dp)),
+                                    color = BroadcastGreen,
+                                    trackColor = StudioBlack
+                                )
+                            } else {
+                                LinearProgressIndicator(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(8.dp)
+                                        .clip(RoundedCornerShape(4.dp)),
+                                    color = BroadcastGreen,
+                                    trackColor = StudioBlack
+                                )
+                            }
+                        }
+                    }
+
+                    // If APK was already downloaded and is ready to install (e.g. after granting unknown sources permission)
+                    val readyFile = downloadedApkFile
+                    if (!isDownloading && readyFile != null && readyFile.exists()) {
+                        Button(
+                            onClick = {
+                                if (AppUpdateManager.canInstallApkDirectly(context)) {
+                                    needsInstallPermission = false
+                                    AppUpdateManager.launchApkInstaller(context, readyFile)
+                                } else {
+                                    AppUpdateManager.openInstallUnknownAppsSettings(context)
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = BroadcastAmber,
+                                contentColor = Color(0xFF1F1300)
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.CheckCircle, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = if (needsInstallPermission && !AppUpdateManager.canInstallApkDirectly(context)) {
+                                    "Autorizar e Instalar Atualização Baixada"
+                                } else {
+                                    "Instalar Atualização Baixada Agora"
+                                },
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        }
+                    }
+
+                    // Primary Update Action Buttons
+                    val targetApkUrl = successResult?.remoteVersion?.apkUrl ?: installedVersion.apkUrl
+                    val targetBrowserUrl =
+                        successResult?.remoteVersion?.browserDownloadUrl ?: installedVersion.browserDownloadUrl
+
+                    if (hasNewUpdate) {
+                        Button(
+                            onClick = { startDownloadAndInstall(targetApkUrl) },
+                            enabled = !isDownloading,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = BroadcastGreen,
+                                contentColor = Color(0xFF042217)
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.CloudDownload, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = "Baixar e Instalar Nova Versão (v${successResult?.remoteVersion?.versionName})",
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = { triggerUpdateCheck(showFeedback = true) },
+                                enabled = !isCheckingUpdate && !isDownloading,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    Icons.Default.Refresh,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text("Procurar Atualização", fontSize = 12.sp)
+                            }
+
+                            Button(
+                                onClick = { startDownloadAndInstall(targetApkUrl) },
+                                enabled = !isDownloading,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = BroadcastCyan,
+                                    contentColor = Color(0xFF041E2B)
+                                ),
+                                modifier = Modifier.weight(1.15f)
+                            ) {
+                                Icon(
+                                    Icons.Default.CloudDownload,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    text = "Baixar Última Versão",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            }
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            AppUpdateManager.openBrowserDownloadFallback(context, targetBrowserUrl)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            Icons.Default.CloudSync,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = BroadcastAmber
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "Baixar APK Direto pelo Navegador (GitHub Oficial)",
+                            fontSize = 12.sp,
+                            color = BroadcastAmber
                         )
                     }
                 }
@@ -1150,7 +1557,7 @@ fun AboutScreen(
                     }
                     HorizontalDivider(color = StudioBorder)
                     TechInfoRow("Desenvolvedor Responsável", "Sandro Assis")
-                    TechInfoRow("Versão do Aplicativo", "1.0.0 (Código 1)")
+                    TechInfoRow("Versão do Aplicativo", "${installedVersion.versionName} (Build ${installedVersion.versionCode})")
                     TechInfoRow("Tecnologia Nativa", "Kotlin 2.3 + Jetpack Compose Material 3")
                     TechInfoRow("Motor de IA On-Device", "Google ML Kit GenAI Prompt API (Gemini Nano)")
                     TechInfoRow("Perfil de Tela Atual", "${windowInfo.formFactor.label} (${windowInfo.screenWidthDp}x${windowInfo.screenHeightDp}dp)")

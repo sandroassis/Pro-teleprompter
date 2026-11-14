@@ -4,6 +4,19 @@ plugins {
   alias(libs.plugins.kotlin.serialization)
 }
 
+val gitCommitCount: Int = try {
+  val process = ProcessBuilder("git", "rev-list", "--count", "HEAD")
+    .directory(rootProject.projectDir)
+    .redirectErrorStream(true)
+    .start()
+  process.inputStream.bufferedReader().readText().trim().toIntOrNull() ?: 11
+} catch (_: Exception) {
+  11
+}
+
+val computedBuildNumber = 100 + gitCommitCount + 1
+val computedVersionName = "1.${gitCommitCount + 1}.0"
+
 android {
   namespace = "com.example.proteleprompter"
   compileSdk = 36
@@ -11,8 +24,8 @@ android {
     applicationId = "com.example.proteleprompter"
     minSdk = 26
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = computedBuildNumber
+    versionName = computedVersionName
   }
 
   buildTypes {
@@ -95,6 +108,31 @@ dependencies {
   implementation(libs.androidx.navigation3.ui)
   implementation(libs.androidx.navigation3.runtime)
   implementation(libs.androidx.lifecycle.viewmodel.navigation3)
+}
+
+val syncVersionMetadata = tasks.register("syncVersionMetadata") {
+  doLast {
+    val jsonContent = """
+      {
+        "versionName": "$computedVersionName",
+        "versionCode": $computedBuildNumber,
+        "apkUrl": "https://raw.githubusercontent.com/sandroassis/Pro-teleprompter/main/pro-teleprompter.apk",
+        "browserDownloadUrl": "https://github.com/sandroassis/Pro-teleprompter/raw/main/pro-teleprompter.apk",
+        "releaseNotes": "Atualização oficial Pro Teleprompter Studio (Build $computedBuildNumber) com melhorias de IA, formatos de roteiro (TV/Rádio) e atualizador integrado."
+      }
+    """.trimIndent() + "\n"
+
+    val assetsDir = file("src/main/assets")
+    if (!assetsDir.exists()) {
+      assetsDir.mkdirs()
+    }
+    file("src/main/assets/version.json").writeText(jsonContent)
+    rootProject.file("version.json").writeText(jsonContent)
+  }
+}
+
+tasks.matching { it.name == "preBuild" || it.name == "generateDebugAssets" }.configureEach {
+  dependsOn(syncVersionMetadata)
 }
 
 tasks.matching { it.name == "assembleDebug" }.configureEach {
