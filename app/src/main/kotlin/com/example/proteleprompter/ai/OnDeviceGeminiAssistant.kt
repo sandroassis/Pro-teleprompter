@@ -182,13 +182,42 @@ class OnDeviceGeminiAssistant {
         }
     }
 
+    @Volatile
+    private var awaitingExternalAppReturn: Boolean = false
+
+    @Volatile
+    private var lastOutgoingClipboardPrompt: String = ""
+
+    @Volatile
+    private var lastImportedClipboardText: String = ""
+
+    fun markSentToExternalAiApp(formattedPrompt: String) {
+        awaitingExternalAppReturn = true
+        lastOutgoingClipboardPrompt = formattedPrompt.trim()
+    }
+
+    fun tryAutoImportClipboardReturn(context: Context, customPromptTitle: String? = null): Boolean {
+        if (!awaitingExternalAppReturn) return false
+        val clip = InstalledAiAppsBridge.readClipboardText(context)?.trim().orEmpty()
+        if (clip.length < 20) return false
+        if (clip == lastOutgoingClipboardPrompt || clip == lastImportedClipboardText) {
+            return false
+        }
+        awaitingExternalAppReturn = false
+        lastImportedClipboardText = clip
+        importExternalScriptResponse(clip, customPromptTitle)
+        return true
+    }
+
     fun importExternalScriptResponse(rawText: String, customPromptTitle: String? = null) {
         val cleaned = rawText.trim()
         if (cleaned.isEmpty()) return
+        awaitingExternalAppReturn = false
+        lastImportedClipboardText = cleaned
         val title = customPromptTitle?.takeIf { it.isNotBlank() } ?: inferTopicTitle(cleaned.lines().firstOrNull().orEmpty())
         val importedMsg = AiChatMessage(
             isUser = false,
-            text = "📥 **Roteiro recebido do App de IA:**\n\n$cleaned",
+            text = "📥 **Retorno recebido do App Gemini / IA:**\n\n$cleaned",
             extractedScript = cleaned,
             suggestedTitle = title,
             isStreaming = false
@@ -204,12 +233,13 @@ class OnDeviceGeminiAssistant {
         val trimmed = userPrompt.trim()
         if (trimmed.isEmpty()) return
 
+        val activeProviderLabel = _selectedExternalApp.value?.displayName ?: "Gemini IA"
         val userMsg = AiChatMessage(isUser = true, text = trimmed)
         val assistantMsgId = UUID.randomUUID().toString()
         val placeholderMsg = AiChatMessage(
             id = assistantMsgId,
             isUser = false,
-            text = "Gerando roteiro com IA...",
+            text = "⏳ Gerando retorno inteligente ($activeProviderLabel)...",
             isStreaming = true
         )
 
@@ -222,7 +252,7 @@ class OnDeviceGeminiAssistant {
             currentScript = currentScriptContent
         )
 
-        // 1. PRIORITY 1: Full-Power Cloud LLM (Gemini 2.5 Flash / OpenAI GPT-4o / Claude) when API key is configured
+        // 1. PRIORITY 1: Full-Power Cloud LLM (Gemini 2.5 Flash / OpenAI GPT-4o / Claude) when custom API key is configured
         val apiKey = _cloudApiKey.value
         if (apiKey.isNotBlank()) {
             val cloudResult = callCloudAiModel(
@@ -243,14 +273,6 @@ class OnDeviceGeminiAssistant {
                     )
                     return
                 }
-            } else {
-                val errMsg = cloudResult.exceptionOrNull()?.localizedMessage ?: "Erro na chave da API"
-                updateAssistantMessage(
-                    id = assistantMsgId,
-                    text = "⚠️ Não foi possível conectar à API (${errMsg}). Verifique sua chave no ícone de engrenagem/chave acima ou clique no botão do App **Google Gemini / ChatGPT** instalado!",
-                    isStreaming = false
-                )
-                return
             }
         }
 
@@ -284,27 +306,133 @@ class OnDeviceGeminiAssistant {
             }
         }
 
-        // 3. PRIORITY 3: Local fallback preview + Prompt ready for Installed Official App (Gemini / ChatGPT / Claude)
-        delay(250)
+        // 3. PRIORITY 3: Built-in Direct Cloud LLM Engine (Returns full AI script directly inside the Teleprompter!)
+        val directCloudResult = callDirectCloudAiWithoutKey(
+            userMessage = trimmed,
+            history = _messages.value.dropLast(2).takeLast(6),
+            currentTitle = currentScriptTitle,
+            currentScript = currentScriptContent
+        )
+        if (directCloudResult.isSuccess) {
+            val responseText = directCloudResult.getOrDefault("").trim()
+            if (responseText.isNotBlank()) {
+                val parsed = extractScriptBlock(responseText, trimmed)
+                updateAssistantMessage(
+                    id = assistantMsgId,
+                    text = responseText,
+                    extractedScript = parsed.first,
+                    suggestedTitle = parsed.second,
+                    isStreaming = false
+                )
+                return
+            }
+        }
+
+        // 4. PRIORITY 4: Offline fallback (Only when device has no internet connection)
+        delay(200)
         val generated = generateSmartOnDeviceResponse(
             userRequest = trimmed,
             currentTitle = currentScriptTitle,
             currentScript = currentScriptContent
         )
-        val installedNames = _installedApps.value.joinToString(", ") { it.displayName }
-        val tipHeader = if (installedNames.isNotEmpty()) {
-            "💡 *Para usar a potência máxima do seu **$installedNames**, toque no botão **\"Abrir no $installedNames\"** abaixo (o seu pedido já foi formatado e copiado) ou configure sua chave gratuita do Gemini 2.5 no topo!*\n\n"
-        } else {
-            "💡 *Para ter respostas com a inteligência completa do Gemini 2.5 Pro/Flash, instale o app oficial **Google Gemini** na Play Store ou insira sua chave gratuita do Google AI Studio no botão de Chave no topo!*\n\n"
-        }
-
         updateAssistantMessage(
             id = assistantMsgId,
-            text = tipHeader + generated.explanation + "\n\n" + generated.scriptContent,
+            text = "📴 *(Modo Offline Sem Internet)* " + generated.explanation + "\n\n" + generated.scriptContent,
             extractedScript = generated.scriptContent,
             suggestedTitle = generated.title,
             isStreaming = false
         )
+    }
+
+    private suspend fun callDirectCloudAiWithoutKey(
+        userMessage: String,
+        history: List<AiChatMessage>,
+        currentTitle: String?,
+        currentScript: String?
+    ): Result<String> = withContext(Dispatchers.IO) {
+        try {
+            val systemInstructions = buildString {
+                appendLine("Você é o motor oficial de Inteligência Artificial do aplicativo Pro Teleprompter Studio.")
+                appendLine("Sua missão é criar, editar ou adaptar roteiros prontos para leitura fluente em voz alta no Teleprompter em Português do Brasil.")
+                appendLine("REGRAS OBRIGATÓRIAS DE FORMATAÇÃO PARA O TELEPROMPTER:")
+                appendLine("1. NÃO use tabelas Markdown (| coluna |). Escreva sempre em texto corrido de locução pronto para ser lido na câmera.")
+                appendLine("2. Divida as partes do roteiro usando: === NOME DO BLOCO === (ex: === ABERTURA ===, === DESENVOLVIMENTO ===, === ENCERRAMENTO ===).")
+                appendLine("3. Insira dicas curtas de direção e expressão entre [DICA] e [/DICA] (ex: [DICA]Olhar firme na lente, tom entusiasmado[/DICA]).")
+                appendLine("4. Destaque palavras ou frases importantes usando [DESTAQUE]texto[/DESTAQUE] ou [ALERTA]texto de forte impacto[/ALERTA].")
+                appendLine("5. Insira pausas de respiração estratégicas usando [PAUSA 2s] ou [PAUSA 3s].")
+                appendLine("6. Seja profundo, criativo, natural e completo, entregando exatamente o conteúdo que o usuário pediu.")
+                if (!currentScript.isNullOrBlank()) {
+                    appendLine()
+                    appendLine("ROTEIRO ATUAL ABERTO NO EDITOR (${currentTitle ?: "Sem título"}):")
+                    appendLine(currentScript)
+                }
+            }
+
+            val endpoint = "https://text.pollinations.ai/openai"
+            val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 15000
+                readTimeout = 35000
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+                setRequestProperty("Accept", "application/json")
+            }
+
+            val payload = buildJsonObject {
+                put("model", "openai")
+                put("messages", buildJsonArray {
+                    add(buildJsonObject {
+                        put("role", "system")
+                        put("content", systemInstructions)
+                    })
+                    history.takeLast(4).forEach { msg ->
+                        add(buildJsonObject {
+                            put("role", if (msg.isUser) "user" else "assistant")
+                            put("content", msg.text.take(600))
+                        })
+                    }
+                    add(buildJsonObject {
+                        put("role", "user")
+                        put("content", userMessage)
+                    })
+                })
+                put("temperature", 0.7)
+            }.toString()
+
+            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(payload) }
+
+            val code = conn.responseCode
+            val body = if (code in 200..299) {
+                conn.inputStream.bufferedReader().use { it.readText() }
+            } else {
+                val err = conn.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                return@withContext Result.failure(IllegalStateException("HTTP $code: ${err.take(120)}"))
+            }
+
+            val parsedText = try {
+                val root = json.parseToJsonElement(body).jsonObject
+                root["choices"]
+                    ?.jsonArray
+                    ?.firstOrNull()
+                    ?.jsonObject
+                    ?.get("message")
+                    ?.jsonObject
+                    ?.get("content")
+                    ?.jsonPrimitive
+                    ?.content
+                    .orEmpty()
+            } catch (_: Exception) {
+                body
+            }
+
+            if (parsedText.isNotBlank()) {
+                Result.success(parsedText.trim())
+            } else {
+                Result.failure(IllegalStateException("Resposta vazia"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
     }
 
     private suspend fun callCloudAiModel(
@@ -533,11 +661,15 @@ class OnDeviceGeminiAssistant {
     }
 
     private fun extractScriptBlock(rawResponse: String, userRequest: String): Pair<String, String> {
-        val cleaned = rawResponse
+        var cleaned = rawResponse
             .replace("```text", "")
             .replace("```markdown", "")
             .replace("```", "")
+            .replace(Regex("""\[pausa\s*:?\s*(\d+)s?\]""", RegexOption.IGNORE_CASE), "[PAUSA $1s]")
             .trim()
+        if (!cleaned.contains("[PAUSA")) {
+            cleaned = "$cleaned\n[PAUSA 2s]"
+        }
         val title = inferTopicTitle(userRequest)
         return cleaned to title
     }

@@ -12,6 +12,7 @@ import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -107,6 +108,7 @@ import com.example.proteleprompter.ui.theme.StudioBlack
 import com.example.proteleprompter.ui.theme.StudioBorder
 import com.example.proteleprompter.ui.theme.StudioCard
 import com.example.proteleprompter.ui.theme.StudioSurface
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -394,11 +396,22 @@ fun GeminiAssistantPanel(
         }
     }
 
-    // Re-check installed apps (Gemini, ChatGPT, Claude) whenever user returns to the app
+    // Re-check installed apps (Gemini, ChatGPT, Claude) AND auto-import return from external app on resume
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 assistant.refreshInstalledAppsAndConfig(context)
+                scope.launch {
+                    // Wait 450ms for Android 10+ window focus before reading clipboard
+                    delay(450)
+                    if (assistant.tryAutoImportClipboardReturn(context, currentScriptTitle)) {
+                        Toast.makeText(
+                            context,
+                            "✨ Retorno da IA recebido automaticamente!",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -442,19 +455,7 @@ fun GeminiAssistantPanel(
         val clean = promptText.trim()
         if (clean.isEmpty() || isGenerating) return
 
-        // If user has an official AI app installed (e.g. Google Gemini / ChatGPT / Claude) AND hasn't configured an in-app API key,
-        // offer or send directly to the installed native app!
-        val activeExternal = selectedExternalApp
-        if (cloudApiKey.isBlank() && status != GeminiNanoStatus.AVAILABLE && activeExternal != null) {
-            InstalledAiAppsBridge.sendPromptToInstalledAiApp(
-                context = context,
-                provider = activeExternal,
-                userRequest = clean,
-                currentTitle = currentScriptTitle,
-                currentScript = currentScriptContent
-            )
-        }
-
+        // Generate the full AI response directly inside Pro Teleprompter so the return comes straight back into the chat!
         inputField = TextFieldValue("")
         isGenerating = true
         scope.launch {
@@ -649,6 +650,12 @@ fun GeminiAssistantPanel(
                         onClick = {
                             assistant.selectExternalApp(app)
                             if (inputField.text.isNotBlank()) {
+                                val formatted = InstalledAiAppsBridge.buildProfessionalTeleprompterPrompt(
+                                    userRequest = inputField.text,
+                                    currentTitle = currentScriptTitle,
+                                    currentScript = currentScriptContent
+                                )
+                                assistant.markSentToExternalAiApp(formatted)
                                 InstalledAiAppsBridge.sendPromptToInstalledAiApp(
                                     context = context,
                                     provider = app,
@@ -660,17 +667,17 @@ fun GeminiAssistantPanel(
                         },
                         label = {
                             Text(
-                                text = "Abrir no ${app.displayName}",
+                                text = "IA Ativa: ${app.displayName}",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold
                             )
                         },
                         leadingIcon = {
                             Icon(
-                                Icons.AutoMirrored.Filled.OpenInNew,
+                                Icons.Default.Check,
                                 contentDescription = null,
                                 modifier = Modifier.size(14.dp),
-                                tint = BroadcastCyan
+                                tint = BroadcastGreen
                             )
                         }
                     )
@@ -737,6 +744,12 @@ fun GeminiAssistantPanel(
                     onOpenInInstalledApp = { promptToOpen ->
                         val provider = selectedExternalApp
                         if (provider != null) {
+                            val formatted = InstalledAiAppsBridge.buildProfessionalTeleprompterPrompt(
+                                userRequest = promptToOpen,
+                                currentTitle = currentScriptTitle,
+                                currentScript = currentScriptContent
+                            )
+                            assistant.markSentToExternalAiApp(formatted)
                             InstalledAiAppsBridge.sendPromptToInstalledAiApp(
                                 context = context,
                                 provider = provider,
