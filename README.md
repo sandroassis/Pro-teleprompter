@@ -45,3 +45,4 @@ Aplicativo Android nativo profissional de **Teleprompter & Estúdio de Gravaçã
 
 O APK compilado é gerado automaticamente na raiz do projeto:
 - `pro-teleprompter.apk`
+
