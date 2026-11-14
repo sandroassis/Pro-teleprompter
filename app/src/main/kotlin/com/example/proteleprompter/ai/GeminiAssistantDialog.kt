@@ -100,6 +100,8 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.proteleprompter.data.ScriptFormatMode
+import com.example.proteleprompter.data.ScriptParser
 import com.example.proteleprompter.ui.theme.BroadcastAmber
 import com.example.proteleprompter.ui.theme.BroadcastCyan
 import com.example.proteleprompter.ui.theme.BroadcastGreen
@@ -362,6 +364,7 @@ fun GeminiAssistantPanel(
     val selectedExternalApp by assistant.selectedExternalApp.collectAsState()
     val cloudApiKey by assistant.cloudApiKey.collectAsState()
     val cloudVendor by assistant.cloudVendor.collectAsState()
+    val scriptFormatMode by assistant.scriptFormatMode.collectAsState()
     val downloadProgress by assistant.downloadProgressText.collectAsState()
     val messages by assistant.messages.collectAsState()
     val listState = rememberLazyListState()
@@ -569,6 +572,64 @@ fun GeminiAssistantPanel(
             color = StudioBorder
         )
 
+        // PROFESSIONAL SCRIPT FORMAT SELECTOR (TV Studio App Default vs Radio Announcer Anticipated Punctuation)
+        Surface(
+            color = StudioSurface,
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 8.dp)
+                .border(1.dp, StudioBorder, RoundedCornerShape(12.dp))
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+                Text(
+                    text = "FORMATO PROFISSIONAL DO ROTEIRO:",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = BroadcastAmber,
+                    fontSize = 10.sp
+                )
+                Spacer(Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    ScriptFormatMode.entries.forEach { mode ->
+                        val selected = scriptFormatMode == mode
+                        FilterChip(
+                            selected = selected,
+                            onClick = { assistant.selectScriptFormatMode(mode, context) },
+                            label = {
+                                Text(
+                                    text = mode.shortLabel,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.Medium,
+                                    maxLines = 1
+                                )
+                            },
+                            leadingIcon = if (selected) {
+                                {
+                                    Icon(
+                                        Icons.Default.Check,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(14.dp),
+                                        tint = BroadcastGreen
+                                    )
+                                }
+                            } else null,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+                Text(
+                    text = scriptFormatMode.subtitle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF94A3B8),
+                    fontSize = 10.sp
+                )
+            }
+        }
+
         // CASE 1: No AI App Installed on Phone AND No API Key Configured -> Recommend downloading Google Gemini!
         if (!isAiEnabledOnDevice) {
             Card(
@@ -741,6 +802,10 @@ fun GeminiAssistantPanel(
                     message = msg,
                     hasExistingScript = !currentScriptContent.isNullOrBlank(),
                     installedAiApp = selectedExternalApp,
+                    currentFormatMode = scriptFormatMode,
+                    onSelectFormatMode = { newMode ->
+                        assistant.selectScriptFormatMode(newMode, context)
+                    },
                     onOpenInInstalledApp = { promptToOpen ->
                         val provider = selectedExternalApp
                         if (provider != null) {
@@ -995,6 +1060,8 @@ private fun ChatBubbleItem(
     message: AiChatMessage,
     hasExistingScript: Boolean,
     installedAiApp: ExternalAiProvider?,
+    currentFormatMode: ScriptFormatMode,
+    onSelectFormatMode: (ScriptFormatMode) -> Unit,
     onOpenInInstalledApp: (String) -> Unit,
     onQuickRefine: (String) -> Unit,
     onApplyScript: (title: String, scriptContent: String, startImmediately: Boolean) -> Unit
@@ -1024,7 +1091,7 @@ private fun ChatBubbleItem(
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
                 Text(
-                    text = if (message.isUser) "Você" else "✨ Co-Criador IA (Roteirista)",
+                    text = if (message.isUser) "Você" else "✨ Co-Criador IA (Roteirista Profissional)",
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Bold,
                     color = if (message.isUser) BroadcastCyan else BroadcastAmber
@@ -1040,15 +1107,20 @@ private fun ChatBubbleItem(
                 val scriptCandidate = message.extractedScript
                 if (!message.isUser && !message.isStreaming && !scriptCandidate.isNullOrBlank()) {
                     val title = message.suggestedTitle ?: "Roteiro Gerado por IA"
-                    val wordCount = scriptCandidate.split(Regex("""\s+""")).count { it.isNotBlank() }
-                    val estimatedSeconds = ((wordCount / 140f) * 60f).toInt().coerceAtLeast(5)
+                    val wordCount = ScriptParser.countSpokenWords(scriptCandidate)
+                    val pauseSecs = ScriptParser.calculateTotalPauseSeconds(scriptCandidate)
+                    val estimatedSeconds = (((wordCount / 140f) * 60f).toInt() + pauseSecs).coerceAtLeast(5)
                     val mins = estimatedSeconds / 60
                     val secs = estimatedSeconds % 60
                     val durationBadge = "%02d:%02d".format(mins, secs)
 
+                    val styledScript = remember(scriptCandidate) {
+                        ScriptParser.buildStyledScript(scriptCandidate)
+                    }
+
                     Spacer(Modifier.height(10.dp))
 
-                    // Dedicated Clean Teleprompter Spoken Script Preview Card
+                    // Dedicated Professional Teleprompter Script Preview Card (Styled identically to the live Teleprompter!)
                     Surface(
                         color = StudioBlack,
                         shape = RoundedCornerShape(12.dp),
@@ -1063,7 +1135,11 @@ private fun ChatBubbleItem(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text = "🎬 TEXTO FALADO (TELEPROMPTER)",
+                                    text = if (currentFormatMode == ScriptFormatMode.RADIO_ANNOUNCER) {
+                                        "🎙️ ROTEIRO LOCUÇÃO DE RÁDIO"
+                                    } else {
+                                        "📺 ROTEIRO ESTÚDIO TV (PADRÃO APP)"
+                                    },
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.ExtraBold,
                                     color = BroadcastCyan
@@ -1075,15 +1151,39 @@ private fun ChatBubbleItem(
                                     color = BroadcastAmber
                                 )
                             }
+
+                            Spacer(Modifier.height(6.dp))
+
+                            // Instant Format Switcher right inside the script card
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                ScriptFormatMode.entries.forEach { mode ->
+                                    val isCurrent = currentFormatMode == mode
+                                    FilterChip(
+                                        selected = isCurrent,
+                                        onClick = { onSelectFormatMode(mode) },
+                                        label = {
+                                            Text(
+                                                text = mode.shortLabel,
+                                                fontSize = 10.sp,
+                                                fontWeight = if (isCurrent) FontWeight.ExtraBold else FontWeight.Normal
+                                            )
+                                        },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                            }
+
                             HorizontalDivider(
                                 modifier = Modifier.padding(vertical = 6.dp),
                                 color = StudioBorder
                             )
                             Text(
-                                text = scriptCandidate,
+                                text = styledScript,
                                 style = MaterialTheme.typography.bodyMedium,
-                                color = Color(0xFFF8FAFC),
-                                lineHeight = 22.sp
+                                lineHeight = 23.sp
                             )
                         }
                     }
@@ -1092,7 +1192,7 @@ private fun ChatBubbleItem(
 
                     // Interactive Co-Creation Refinement Chips
                     Text(
-                        text = "Ajustar roteiro com a IA:",
+                        text = "Refinar com a IA:",
                         style = MaterialTheme.typography.labelSmall,
                         color = Color(0xFF94A3B8)
                     )
@@ -1104,11 +1204,10 @@ private fun ChatBubbleItem(
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         val refinements = listOf(
-                            "✨ Mais natural e conversado" to "Deixe esse roteiro ainda mais natural, fluido e conversado, como uma conversa real olhando para a câmera.",
-                            "⏱ Encurtar p/ 30s" to "Enxugue e adapte esse roteiro para caber em 30 segundos mantendo o impacto principal.",
+                            "✨ Mais natural e conversado" to "Deixe esse roteiro ainda mais natural, fluido e conversado mantendo a estrutura profissional.",
+                            "⏱ Encurtar p/ 30s" to "Enxugue e adapte esse roteiro para caber em 30 segundos mantendo as marcações profissionais.",
                             "🔥 Melhorar abertura" to "Crie um gancho inicial mais forte nas primeiras frases desse roteiro para prender a atenção logo nos 3 primeiros segundos.",
-                            "📈 Desenvolver mais" to "Expanda e desenvolva um pouco mais os argumentos desse roteiro com exemplos práticos.",
-                            "⏸ Inserir pausas" to "Mantenha o texto natural desse roteiro e adicione marcações [PAUSA 2s] nos melhores momentos de respiração."
+                            "📈 Desenvolver mais" to "Expanda e desenvolva um pouco mais os argumentos desse roteiro com exemplos práticos."
                         )
                         refinements.forEach { (chipLabel, promptCommand) ->
                             AssistChip(
@@ -1166,7 +1265,7 @@ private fun ChatBubbleItem(
                             )
                             Spacer(Modifier.width(4.dp))
                             Text(
-                                text = "Gravar Vídeo no Prompter",
+                                text = "Iniciar Teleprompter",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.ExtraBold
                             )

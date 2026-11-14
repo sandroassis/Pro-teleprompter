@@ -19,6 +19,24 @@ enum class PrompterBackground(val label: String, val colorHex: Long) {
 }
 
 @Serializable
+enum class ScriptFormatMode(
+    val label: String,
+    val shortLabel: String,
+    val subtitle: String
+) {
+    TV_STUDIO(
+        label = "Padrão Estúdio TV (Modelos do App)",
+        shortLabel = "📺 Estúdio TV (Padrão App)",
+        subtitle = "Blocos === ===, [DICA], [DESTAQUE], [ALERTA] e [PAUSA 2s] igual aos modelos do app"
+    ),
+    RADIO_ANNOUNCER(
+        label = "Locução de Rádio (Pontuação Antecipada)",
+        shortLabel = "🎙️ Locução de Rádio",
+        subtitle = "Antecipa [? PERGUNTA] ¿, [! ENTUSIASMO] ¡ e [. AFIRMAÇÃO] no início da frase"
+    )
+}
+
+@Serializable
 data class Script(
     val id: String,
     val title: String,
@@ -102,8 +120,12 @@ data class BackupPayload(
 
 object ScriptParser {
     private val pauseRegex = Regex("""\[PAUSA\s+(\d+)s]""", RegexOption.IGNORE_CASE)
+    private val radioPrefixRegex = Regex(
+        """^\s*(\[\?\s*[^\]]*]\s*¿?|\[\!\s*[^\]]*]\s*¡?|\[\.\.\.\s*[^\]]*]|\[\.\s*[^\]]*])\s*""",
+        setOf(RegexOption.IGNORE_CASE, RegexOption.MULTILINE)
+    )
     private val tagStripRegex = Regex(
-        """\[/?(DESTAQUE|ALERTA|DICA)]|\[PAUSA\s+\d+s]|===\s*.*?\s*===""",
+        """\[/?(DESTAQUE|ALERTA|DICA)]|\[PAUSA\s+\d+s]|===\s*.*?\s*===|\[\?\s*[^\]]*]\s*¿?|\[\!\s*[^\]]*]\s*¡?|\[\.\.\.\s*[^\]]*]|\[\.\s*[^\]]*]|[¿¡]""",
         RegexOption.IGNORE_CASE
     )
 
@@ -163,6 +185,7 @@ object ScriptParser {
      * - [DICA]instrução de cena[/DICA] -> Cyan italic stage direction
      * - [PAUSA 3s] -> Visual badge for timed pause
      * - === TÓPICO === -> Section header divider
+     * - [? PERGUNTA] ¿ / [! EXCLAMAÇÃO] ¡ / [. AFIRMAÇÃO] / [... SUSPENSE] -> Radio Announcer anticipated intonation cues
      */
     fun buildStyledScript(
         rawText: String,
@@ -173,7 +196,7 @@ object ScriptParser {
             var cursor = 0
             val text = rawText
             val tokenRegex = Regex(
-                """(\[DESTAQUE](.*?)\[/DESTAQUE])|(\[ALERTA](.*?)\[/ALERTA])|(\[DICA](.*?)\[/DICA])|(\[PAUSA\s+(\d+)s])|(===\s*(.*?)\s*===)""",
+                """(\[DESTAQUE](.*?)\[/DESTAQUE])|(\[ALERTA](.*?)\[/ALERTA])|(\[DICA](.*?)\[/DICA])|(\[PAUSA\s+(\d+)s])|(===\s*(.*?)\s*===)|(\[\?\s*([^\]]*)]\s*¿?)|(\[\!\s*([^\]]*)]\s*¡?)|(\[\.\.\.\s*([^\]]*)])|(\[\.\s*([^\]]*)])""",
                 setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
             )
 
@@ -256,6 +279,62 @@ object ScriptParser {
                             length
                         )
                     }
+                    match.groups[11] != null -> {
+                        val label = match.groups[12]?.value?.trim()?.takeIf { it.isNotEmpty() } ?: "PERGUNTA"
+                        val startIdx = length
+                        append("❓ [$label] ¿ ")
+                        addStyle(
+                            SpanStyle(
+                                color = Color(0xFF38BDF8),
+                                background = Color(0x3338BDF8),
+                                fontWeight = FontWeight.ExtraBold
+                            ),
+                            startIdx,
+                            length
+                        )
+                    }
+                    match.groups[13] != null -> {
+                        val label = match.groups[14]?.value?.trim()?.takeIf { it.isNotEmpty() } ?: "ENTUSIASMO"
+                        val startIdx = length
+                        append("❗ [$label] ¡ ")
+                        addStyle(
+                            SpanStyle(
+                                color = Color(0xFFFBBF24),
+                                background = Color(0x33FBBF24),
+                                fontWeight = FontWeight.ExtraBold
+                            ),
+                            startIdx,
+                            length
+                        )
+                    }
+                    match.groups[15] != null -> {
+                        val label = match.groups[16]?.value?.trim()?.takeIf { it.isNotEmpty() } ?: "SUSPENSE"
+                        val startIdx = length
+                        append("〰️ [$label] ")
+                        addStyle(
+                            SpanStyle(
+                                color = Color(0xFFC084FC),
+                                background = Color(0x33C084FC),
+                                fontWeight = FontWeight.Bold
+                            ),
+                            startIdx,
+                            length
+                        )
+                    }
+                    match.groups[17] != null -> {
+                        val label = match.groups[18]?.value?.trim()?.takeIf { it.isNotEmpty() } ?: "AFIRMAÇÃO"
+                        val startIdx = length
+                        append("⏺ [$label] ")
+                        addStyle(
+                            SpanStyle(
+                                color = Color(0xFF34D399),
+                                background = Color(0x2610B981),
+                                fontWeight = FontWeight.Bold
+                            ),
+                            startIdx,
+                            length
+                        )
+                    }
                 }
                 cursor = match.range.last + 1
             }
@@ -283,6 +362,146 @@ object ScriptParser {
                 )
             }
         }
+    }
+
+    /**
+     * Converts any script into the selected professional format:
+     * - TV_STUDIO: Structured with === BLOCO ===, [DICA], [DESTAQUE], [ALERTA], and [PAUSA 2s] like the built-in app models.
+     * - RADIO_ANNOUNCER: Structured for radio/voiceover with anticipated punctuation at the start of every sentence
+     *   ([? PERGUNTA] ¿, [! ENTUSIASMO] ¡, [. AFIRMAÇÃO], [... TRANSIÇÃO]) so the speaker knows the intonation upfront.
+     */
+    fun applyProfessionalFormat(rawScript: String, mode: ScriptFormatMode): String {
+        return when (mode) {
+            ScriptFormatMode.TV_STUDIO -> formatAsTvStudio(rawScript)
+            ScriptFormatMode.RADIO_ANNOUNCER -> formatAsRadioAnnouncer(rawScript)
+        }
+    }
+
+    fun formatAsTvStudio(rawScript: String): String {
+        // Strip radio anticipated punctuation markers if converting from Radio mode
+        var cleaned = rawScript
+            .replace(radioPrefixRegex, "")
+            .replace(Regex("""^\s*[¿¡]\s*""", RegexOption.MULTILINE), "")
+            .trim()
+
+        val hasBlocks = cleaned.contains("===")
+        val hasDica = cleaned.contains("[DICA", ignoreCase = true)
+        val hasPause = cleaned.contains("[PAUSA", ignoreCase = true)
+
+        if (hasBlocks && (hasDica || hasPause)) {
+            return cleaned
+        }
+
+        // Organize plain paragraphs into the exact TV Studio model structure
+        val paragraphs = cleaned
+            .split(Regex("""\n\s*\n"""))
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+
+        if (paragraphs.isEmpty()) return cleaned
+
+        return buildString {
+            paragraphs.forEachIndexed { idx, para ->
+                when {
+                    idx == 0 -> {
+                        if (!para.startsWith("===")) {
+                            appendLine("=== ABERTURA & GANCHO ===")
+                            if (!para.contains("[DICA", ignoreCase = true)) {
+                                appendLine("[DICA]Olhar firme na lente, sorriso leve e energia alta[/DICA]")
+                            }
+                        }
+                        appendLine(highlightKeyPhraseIfNeeded(para, isHighlight = true))
+                        if (!para.contains("[PAUSA", ignoreCase = true)) {
+                            appendLine("[PAUSA 2s]")
+                        }
+                    }
+                    idx == paragraphs.lastIndex && paragraphs.size > 1 -> {
+                        if (!para.startsWith("===")) {
+                            appendLine()
+                            appendLine("=== ENCERRAMENTO & CHAMADA (CTA) ===")
+                            if (!para.contains("[DICA", ignoreCase = true)) {
+                                appendLine("[DICA]Tom conclusivo, apontando ou convidando para ação[/DICA]")
+                            }
+                        }
+                        appendLine(highlightKeyPhraseIfNeeded(para, isHighlight = false))
+                    }
+                    else -> {
+                        if (idx == 1 && !para.startsWith("===")) {
+                            appendLine()
+                            appendLine("=== DESENVOLVIMENTO PRINCIPAL ===")
+                            if (!para.contains("[DICA", ignoreCase = true)) {
+                                appendLine("[DICA]Ritmo natural e articulado[/DICA]")
+                            }
+                        } else {
+                            appendLine()
+                        }
+                        appendLine(highlightKeyPhraseIfNeeded(para, isHighlight = idx % 2 == 0))
+                        if (!para.contains("[PAUSA", ignoreCase = true)) {
+                            appendLine("[PAUSA 2s]")
+                        }
+                    }
+                }
+            }
+        }.trim()
+    }
+
+    fun formatAsRadioAnnouncer(rawScript: String): String {
+        val baseStudio = formatAsTvStudio(rawScript)
+        val lines = baseStudio.lines()
+        val result = mutableListOf<String>()
+
+        for (rawLine in lines) {
+            val line = rawLine.trim()
+            if (line.isEmpty() ||
+                line.startsWith("===") ||
+                line.startsWith("[DICA", ignoreCase = true) ||
+                line.startsWith("[PAUSA", ignoreCase = true)
+            ) {
+                result.add(line)
+                continue
+            }
+
+            // Split paragraph into individual sentences and prepend anticipated punctuation cue to each sentence
+            val cleanLine = line.replace(radioPrefixRegex, "").trim()
+            val sentences = cleanLine.split(Regex("""(?<=[.!?…])\s+""")).filter { it.isNotBlank() }
+
+            if (sentences.isEmpty()) {
+                result.add(line)
+            } else {
+                sentences.forEach { sentence ->
+                    val s = sentence.trim().removePrefix("¿").removePrefix("¡").trim()
+                    val plainCheck = s.replace(tagStripRegex, "").trim()
+                    val formattedSentence = when {
+                        plainCheck.endsWith("?") -> "[? PERGUNTA] ¿ $s"
+                        plainCheck.endsWith("!") -> "[! ENTUSIASMO] ¡ $s"
+                        plainCheck.endsWith("...") || plainCheck.endsWith("…") -> "[... TRANSIÇÃO] $s"
+                        else -> "[. AFIRMAÇÃO] $s"
+                    }
+                    result.add(formattedSentence)
+                }
+            }
+        }
+
+        return result.joinToString("\n").replace("[DICA]Olhar firme na lente", "[DICA]Postura de locução, sorriso na voz")
+    }
+
+    private fun highlightKeyPhraseIfNeeded(paragraph: String, isHighlight: Boolean): String {
+        if (paragraph.contains("[DESTAQUE", ignoreCase = true) ||
+            paragraph.contains("[ALERTA", ignoreCase = true) ||
+            paragraph.startsWith("===") ||
+            paragraph.startsWith("[")
+        ) {
+            return paragraph
+        }
+        val words = paragraph.split(" ")
+        if (words.size < 7) return paragraph
+        val tag = if (isHighlight) "DESTAQUE" else "ALERTA"
+        val start = (words.size / 3).coerceAtLeast(1)
+        val end = (start + 4).coerceAtMost(words.size - 1)
+        val before = words.subList(0, start).joinToString(" ")
+        val middle = words.subList(start, end).joinToString(" ")
+        val after = words.subList(end, words.size).joinToString(" ")
+        return "$before [$tag]$middle[/$tag] $after"
     }
 
     private fun AnnotatedString.Builder.pushStyle(style: SpanStyle, start: Int, end: Int) {

@@ -43,6 +43,15 @@ class MainScreenViewModelTest {
         val lastMessage = messages.last()
         assertEquals(false, lastMessage.isUser)
         assertTrue(!lastMessage.extractedScript.isNullOrBlank())
-        assertTrue(lastMessage.extractedScript!!.length > 20)
+        assertTrue(lastMessage.extractedScript!!.contains("==="))
+        assertTrue(lastMessage.extractedScript!!.contains("[PAUSA"))
+
+        // Switch to Radio Announcer mode and verify anticipated punctuation at sentence start
+        val radioFormatted = ScriptParser.formatAsRadioAnnouncer(
+            "Você quer falar melhor no microfone? Hoje vamos aprender a técnica de rádio! O segredo está na entonação antecipada."
+        )
+        assertTrue(radioFormatted.contains("[? PERGUNTA] ¿"))
+        assertTrue(radioFormatted.contains("[! ENTUSIASMO] ¡"))
+        assertTrue(radioFormatted.contains("[. AFIRMAÇÃO]"))
     }
 }

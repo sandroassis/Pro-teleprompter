@@ -1,6 +1,8 @@
 package com.example.proteleprompter.ai
 
 import android.content.Context
+import com.example.proteleprompter.data.ScriptFormatMode
+import com.example.proteleprompter.data.ScriptParser
 import com.google.mlkit.genai.common.DownloadStatus
 import com.google.mlkit.genai.common.FeatureStatus
 import com.google.mlkit.genai.prompt.Generation
@@ -69,6 +71,9 @@ class OnDeviceGeminiAssistant {
     private val _cloudVendor = MutableStateFlow(CloudAiVendor.GOOGLE_GEMINI)
     val cloudVendor: StateFlow<CloudAiVendor> = _cloudVendor.asStateFlow()
 
+    private val _scriptFormatMode = MutableStateFlow(ScriptFormatMode.TV_STUDIO)
+    val scriptFormatMode: StateFlow<ScriptFormatMode> = _scriptFormatMode.asStateFlow()
+
     private val _downloadProgressText = MutableStateFlow<String?>(null)
     val downloadProgressText: StateFlow<String?> = _downloadProgressText.asStateFlow()
 
@@ -76,20 +81,44 @@ class OnDeviceGeminiAssistant {
         listOf(
             AiChatMessage(
                 isUser = false,
-                text = "Olá! Sou seu **Co-Criador de Roteiros com IA** para gravação de vídeos.\n\n" +
-                    "Fale no microfone ou digite sobre o que você quer gravar hoje — podemos criar um roteiro do zero, estruturar ideias juntos ou deixar um texto que você já tem mais natural para ler na câmera!"
+                text = "Olá! Sou seu **Co-Criador de Roteiros Profissionais**.\n\n" +
+                    "Escolha acima o estilo de roteiro desejado:\n" +
+                    "• **📺 Estúdio TV (Padrão do App)**: Organizado com blocos `=== ===`, `[DICA]`, `[DESTAQUE]`, `[ALERTA]` e `[PAUSA 2s]`.\n" +
+                    "• **🎙️ Locução de Rádio (Pontuação Antecipada)**: Antecipa `[? PERGUNTA] ¿`, `[! ENTUSIASMO] ¡` e `[. AFIRMAÇÃO]` no início de cada frase para você já saber a entonação antes de ler!"
             )
         )
     )
     val messages: StateFlow<List<AiChatMessage>> = _messages.asStateFlow()
 
+    fun selectScriptFormatMode(mode: ScriptFormatMode, context: Context? = null) {
+        _scriptFormatMode.value = mode
+        context?.getSharedPreferences("pro_teleprompter_ai_prefs", Context.MODE_PRIVATE)
+            ?.edit()
+            ?.putString("script_format_mode", mode.name)
+            ?.apply()
+
+        // Instantly convert all already-generated scripts in the conversation to the newly chosen professional format!
+        _messages.value = _messages.value.map { msg ->
+            if (!msg.isUser && !msg.extractedScript.isNullOrBlank()) {
+                msg.copy(
+                    extractedScript = ScriptParser.applyProfessionalFormat(msg.extractedScript, mode)
+                )
+            } else {
+                msg
+            }
+        }
+    }
+
     fun refreshInstalledAppsAndConfig(context: Context) {
         val prefs = context.getSharedPreferences("pro_teleprompter_ai_prefs", Context.MODE_PRIVATE)
         val savedKey = prefs.getString("cloud_api_key", "").orEmpty().trim()
         val savedVendorName = prefs.getString("cloud_vendor", CloudAiVendor.GOOGLE_GEMINI.name)
+        val savedFormatName = prefs.getString("script_format_mode", ScriptFormatMode.TV_STUDIO.name)
         _cloudApiKey.value = savedKey
         _cloudVendor.value = CloudAiVendor.entries.find { it.name == savedVendorName }
             ?: CloudAiVendor.GOOGLE_GEMINI
+        _scriptFormatMode.value = ScriptFormatMode.entries.find { it.name == savedFormatName }
+            ?: ScriptFormatMode.TV_STUDIO
 
         val detected = InstalledAiAppsBridge.detectInstalledAiApps(context)
         _installedApps.value = detected
@@ -370,15 +399,36 @@ class OnDeviceGeminiAssistant {
         onPartialText: (String) -> Unit
     ): Result<String> = withContext(Dispatchers.IO) {
         try {
+            val activeMode = _scriptFormatMode.value
+            val formatSpecificRules = when (activeMode) {
+                ScriptFormatMode.TV_STUDIO -> """
+                    FORMATO ESCOLHIDO PELO USUÁRIO: ROTEIRO DE ESTÚDIO TV / VÍDEO (PADRÃO DO APP)
+                    Dentro de <roteiro>...</roteiro>, entregue o roteiro organizado de forma profissional idêntica aos modelos do app:
+                    - Divida as seções com: === NOME DO BLOCO === (ex: === ABERTURA ===, === DESENVOLVIMENTO ===, === CHAMADA FINAL ===)
+                    - Adicione orientações de expressão/câmera com: [DICA]orientação curta[/DICA]
+                    - Destaque termos importantes com: [DESTAQUE]palavras de ênfase[/DESTAQUE] e frases de forte impacto com: [ALERTA]frase de impacto[/ALERTA]
+                    - Insira pausas estratégicas de respiração com: [PAUSA 2s] ou [PAUSA 3s].
+                """.trimIndent()
+                ScriptFormatMode.RADIO_ANNOUNCER -> """
+                    FORMATO ESCOLHIDO PELO USUÁRIO: LOCUÇÃO PROFISSIONAL DE RÁDIO (PONTUAÇÃO ANTECIPADA NO INÍCIO DA FRASE)
+                    Dentro de <roteiro>...</roteiro>, entregue o roteiro organizado para Locução de Rádio onde CADA FRASE antecipa sua pontuação e entonação logo no INÍCIO da frase para o locutor já saber a entonação antes de começar a falar:
+                    - Frases interrogativas (perguntas): comece a frase com [? PERGUNTA] ¿ e termine com ?
+                    - Frases exclamativas / vibrantes / impacto: comece a frase com [! ENTUSIASMO] ¡ e termine com !
+                    - Frases afirmativas / declarativas: comece a frase com [. AFIRMAÇÃO] e termine com .
+                    - Frases de transição ou suspense: comece a frase com [... TRANSIÇÃO] e termine com ...
+                    - Use também === NOME DO BLOCO === para dividir as partes, [DICA]tom de voz[/DICA], [DESTAQUE]palavras tônicas[/DESTAQUE] e [PAUSA 2s] para respiração.
+                """.trimIndent()
+            }
+
             val systemInstructions = buildString {
-                appendLine("Você é um Parceiro Criativo e Roteirista Profissional especialista em gravação de vídeos com Teleprompter.")
+                appendLine("Você é um Parceiro Criativo e Roteirista Profissional especialista em Teleprompter de TV e Locução de Rádio.")
                 appendLine("Converse sempre em Português do Brasil de forma natural, acolhedora, inteligente e direta.")
                 appendLine("COMO AJUDAR O USUÁRIO:")
-                appendLine("1. Você pode tanto criar um roteiro completo do zero quanto ajudar o usuário a construir, refinar, encurtar, expandir ou melhorar ideias de vídeo passo a passo.")
-                appendLine("2. Sempre que você entregar ou atualizar um roteiro para ser lido na câmera, coloque o texto falado dentro das tags <roteiro> e </roteiro>.")
-                appendLine("3. DENTRO de <roteiro>...</roteiro>, escreva APENAS o texto falado natural, fluido e humano — exatamente como a pessoa vai falar olhando para a lente da câmera ao gravar o vídeo.")
-                appendLine("4. Separe as frases do <roteiro> em parágrafos curtos e respiráveis para facilitar a leitura no Teleprompter. NÃO use tabelas, NÃO use asteriscos (**), NÃO use títulos com # e NÃO use códigos técnicos dentro do <roteiro> (a menos que o usuário peça expressamente pausas [PAUSA 2s]).")
-                appendLine("5. FORA da tag <roteiro>, seja breve (1 a 3 frases): comente de forma natural sobre a escolha do gancho/ritmo ou pergunte se o usuário quer ajustar alguma parte antes de gravar.")
+                appendLine("1. Você pode tanto criar um roteiro profissional completo quanto ajudar o usuário a construir, refinar, encurtar ou melhorar ideias passo a passo.")
+                appendLine("2. Sempre que você entregar ou atualizar um roteiro, coloque o roteiro completo dentro das tags <roteiro> e </roteiro>.")
+                appendLine("3. NÃO use tabelas Markdown (| coluna |) e NÃO use asteriscos (**).")
+                appendLine(formatSpecificRules)
+                appendLine("4. FORA da tag <roteiro>, seja breve (1 a 2 frases): comente de forma natural ou pergunte se o usuário quer ajustar algo antes de iniciar o Teleprompter.")
                 if (!currentScript.isNullOrBlank()) {
                     appendLine()
                     appendLine("ROTEIRO ATUAL EM TRABALHO (${currentTitle ?: "Roteiro Atual"}):")
@@ -726,14 +776,20 @@ class OnDeviceGeminiAssistant {
         } else {
             ""
         }
+        val formatRule = when (_scriptFormatMode.value) {
+            ScriptFormatMode.TV_STUDIO ->
+                "Use o formato Estúdio TV (Padrão do App): blocos === NOME DO BLOCO ===, [DICA]orientação[/DICA], [DESTAQUE]ênfase[/DESTAQUE], [ALERTA]impacto[/ALERTA] e [PAUSA 2s]."
+            ScriptFormatMode.RADIO_ANNOUNCER ->
+                "Use o formato Locução de Rádio com pontuação antecipada no início de cada frase: [? PERGUNTA] ¿ para perguntas, [! ENTUSIASMO] ¡ para frases exclamativas, [. AFIRMAÇÃO] para frases declarativas e [... TRANSIÇÃO] para transições, além de === NOME DO BLOCO ===, [DICA] e [PAUSA 2s]."
+        }
 
         return """
-            Você é um Parceiro Criativo e Roteirista Profissional especialista em gravação de vídeos com Teleprompter.
+            Você é um Parceiro Criativo e Roteirista Profissional especialista em Teleprompter de TV e Locução de Rádio.
             Converse em Português do Brasil de forma natural, acolhedora, inteligente e direta.
-            1. Você pode tanto criar um roteiro completo quanto ajudar o usuário a construir, refinar, encurtar ou melhorar ideias de vídeo passo a passo.
-            2. Sempre que entregar ou atualizar um roteiro para o usuário ler na câmera, coloque o texto falado dentro de <roteiro> e </roteiro>.
-            3. Dentro de <roteiro>...</roteiro>, escreva APENAS o texto falado natural, fluido e humano — exatamente como a pessoa vai falar olhando para a lente da câmera ao gravar o vídeo, dividido em parágrafos curtos.
-            4. Fora da tag <roteiro>, seja breve (1 a 3 frases): comente ou pergunte se o usuário quer ajustar o tom antes de gravar.
+            1. Você pode tanto criar um roteiro completo quanto ajudar o usuário a construir, refinar, encurtar ou melhorar ideias passo a passo.
+            2. Sempre que entregar ou atualizar um roteiro, coloque o texto completo dentro de <roteiro> e </roteiro>.
+            3. $formatRule
+            4. Fora da tag <roteiro>, seja breve (1 a 2 frases): comente ou pergunte se o usuário quer ajustar o tom antes de iniciar o Teleprompter.
             $scriptContext
             Histórico recente da conversa:
             $historyContext
@@ -765,7 +821,6 @@ class OnDeviceGeminiAssistant {
         val rawScriptBlock = if (match != null) {
             match.groupValues[1].trim()
         } else {
-            // If LLM didn't wrap in <roteiro>, extract spoken text cleanly
             strippedCodeFences
                 .lines()
                 .filterNot { line ->
@@ -783,22 +838,28 @@ class OnDeviceGeminiAssistant {
             .replace(Regex("""\[pausa\s*:?\s*(\d+)s?\]""", RegexOption.IGNORE_CASE), "[PAUSA $1s]")
             .trim()
 
+        val professionallyFormatted = if (cleanSpokenScript.isNotBlank()) {
+            ScriptParser.applyProfessionalFormat(cleanSpokenScript, _scriptFormatMode.value)
+        } else {
+            null
+        }
+
         val conversationalNotes = if (match != null) {
             strippedCodeFences.replace(match.value, "").trim()
         } else {
-            "Aqui está uma sugestão de roteiro natural pronta para leitura na câmera. Você pode pedir ajustes ou abrir direto no Teleprompter para gravar:"
+            "Roteiro estruturado no padrão **${_scriptFormatMode.value.label}** pronto para o Teleprompter:"
         }
 
         val finalDisplayText = if (conversationalNotes.isNotBlank()) {
             conversationalNotes
         } else {
-            "Preparei o roteiro com linguagem natural para você gravar no Teleprompter:"
+            "Preparei o roteiro organizado no formato **${_scriptFormatMode.value.label}**:"
         }
 
         val title = inferTopicTitle(userRequest)
         return ParsedAiScriptResponse(
             displayChatText = finalDisplayText,
-            cleanTeleprompterScript = cleanSpokenScript.ifBlank { null },
+            cleanTeleprompterScript = professionallyFormatted,
             suggestedTitle = title
         )
     }
@@ -816,37 +877,32 @@ class OnDeviceGeminiAssistant {
     ): GeneratedScriptResult {
         val topic = inferTopicTitle(userRequest)
 
-        if (!currentScript.isNullOrBlank()) {
-            val paragraphs = currentScript
-                .lines()
-                .map { it.trim() }
-                .filter { it.isNotBlank() && !it.startsWith("===") }
+        val baseScript = if (!currentScript.isNullOrBlank()) {
+            currentScript
+        } else {
+            """
+            === ABERTURA & GANCHO ===
+            [DICA]Olhar firme na lente, sorriso leve e energia alta[/DICA]
+            Você já parou para pensar em como [DESTAQUE]$topic[/DESTAQUE] pode transformar completamente os seus resultados?
+            [PAUSA 2s]
 
-            val enhanced = paragraphs.joinToString("\n\n") { line ->
-                line.trim()
-            }
+            === DESENVOLVIMENTO PRINCIPAL ===
+            [DICA]Tom seguro, natural e articulado[/DICA]
+            Muita gente tem dúvida de por onde começar, mas a verdade é que [ALERTA]aplicar o método certo com consistência[/ALERTA] faz toda a diferença na prática!
+            [PAUSA 2s]
 
-            return GeneratedScriptResult(
-                title = currentTitle ?: "Roteiro: $topic",
-                explanation = "Ajustei o seu roteiro deixando a leitura mais fluida e natural para a câmera:",
-                scriptContent = enhanced
-            )
+            === ENCERRAMENTO & CHAMADA (CTA) ===
+            [DICA]Apontar para o botão abaixo com entusiasmo[/DICA]
+            Se esse conteúdo fez sentido para você, deixe seu curtir, comente aqui embaixo e inscreva-se agora mesmo!
+            """.trimIndent()
         }
 
-        val script = """
-            Olá, pessoal! Tudo bem com vocês? Hoje eu quero conversar de forma bem direta sobre $topic.
-
-            Muita gente tem dúvida de por onde começar quando o assunto é esse, mas a verdade é que pequenos passos bem aplicados no dia a dia fazem toda a diferença no resultado final.
-
-            Por isso, eu preparei este vídeo para compartilhar com você o que realmente funciona na prática, de um jeito simples, rápido e fácil de aplicar agora mesmo.
-
-            Se esse conteúdo te ajudou, já deixa o seu curtir aqui embaixo, comenta a sua opinião e compartilha com quem também precisa ver isso. Até o próximo vídeo!
-        """.trimIndent()
+        val formatted = ScriptParser.applyProfessionalFormat(baseScript, _scriptFormatMode.value)
 
         return GeneratedScriptResult(
-            title = "Roteiro: $topic",
-            explanation = "Preparei uma base natural e conversada sobre **$topic** pronta para ler e gravar no Teleprompter:",
-            scriptContent = script
+            title = currentTitle ?: "Roteiro: $topic",
+            explanation = "Roteiro profissional organizado no modo **${_scriptFormatMode.value.label}**:",
+            scriptContent = formatted
         )
     }
 

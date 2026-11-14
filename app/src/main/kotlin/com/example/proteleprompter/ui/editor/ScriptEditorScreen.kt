@@ -530,8 +530,35 @@ fun ScriptEditorScreen(
 
                 Spacer(Modifier.height(6.dp))
 
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CueTagChip(
+                        label = "📺 Formatar Padrão Estúdio TV",
+                        icon = Icons.Default.BookmarkAdd,
+                        tint = BroadcastGreen,
+                        onClick = {
+                            val formatted = ScriptParser.formatAsTvStudio(textFieldValue.text)
+                            textFieldValue = TextFieldValue(formatted, TextRange(formatted.length))
+                        }
+                    )
+                    CueTagChip(
+                        label = "🎙️ Formatar Locução de Rádio (? ! . no início)",
+                        icon = Icons.Default.RecordVoiceOver,
+                        tint = BroadcastAmber,
+                        onClick = {
+                            val formatted = ScriptParser.formatAsRadioAnnouncer(textFieldValue.text)
+                            textFieldValue = TextFieldValue(formatted, TextRange(formatted.length))
+                        }
+                    )
+                }
+
+                Spacer(Modifier.height(4.dp))
+
                 Text(
-                    text = "Inserir Marcadores de Estúdio (Pausas, Ênfase e Tópicos):",
+                    text = "Inserir Marcadores de Estúdio e Locução de Rádio:",
                     style = MaterialTheme.typography.labelSmall,
                     color = Color(0xFF94A3B8)
                 )
@@ -543,6 +570,24 @@ fun ScriptEditorScreen(
                         .horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    CueTagChip(
+                        label = "❓ [? PERGUNTA] ¿",
+                        icon = Icons.Default.RecordVoiceOver,
+                        tint = BroadcastCyan,
+                        onClick = { insertSnippet("[? PERGUNTA] ¿ ") }
+                    )
+                    CueTagChip(
+                        label = "❗ [! ENTUSIASMO] ¡",
+                        icon = Icons.Default.RecordVoiceOver,
+                        tint = BroadcastAmber,
+                        onClick = { insertSnippet("[! ENTUSIASMO] ¡ ") }
+                    )
+                    CueTagChip(
+                        label = "⏺ [. AFIRMAÇÃO]",
+                        icon = Icons.Default.RecordVoiceOver,
+                        tint = BroadcastGreen,
+                        onClick = { insertSnippet("[. AFIRMAÇÃO] ") }
+                    )
                     CueTagChip(
                         label = "+ Pausa 2s",
                         icon = Icons.Default.PauseCircle,
