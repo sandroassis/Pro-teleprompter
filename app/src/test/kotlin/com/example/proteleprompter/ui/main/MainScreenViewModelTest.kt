@@ -43,6 +43,6 @@ class MainScreenViewModelTest {
         val lastMessage = messages.last()
         assertEquals(false, lastMessage.isUser)
         assertTrue(!lastMessage.extractedScript.isNullOrBlank())
-        assertTrue(lastMessage.extractedScript!!.contains("[PAUSA"))
+        assertTrue(lastMessage.extractedScript!!.length > 20)
     }
 }

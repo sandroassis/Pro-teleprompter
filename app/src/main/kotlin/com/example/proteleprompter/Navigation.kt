@@ -100,6 +100,7 @@ fun MainNavigation() {
 
                         backStack.removeLastOrNull()
                         if (startImmediately) {
+                            mainViewModel.updateSettings { it.copy(useCameraOverlay = true) }
                             backStack.add(Prompter(targetScript.id))
                         } else if (existingScript == null) {
                             backStack.add(Editor(targetScript.id))

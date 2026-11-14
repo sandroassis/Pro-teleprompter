@@ -76,10 +76,8 @@ class OnDeviceGeminiAssistant {
         listOf(
             AiChatMessage(
                 isUser = false,
-                text = "Olá! Sou sua central de **IA para Roteiros de Teleprompter**.\n\n" +
-                    "Para ter **100% da inteligência do Gemini, ChatGPT ou Claude**, você pode:\n" +
-                    "1️⃣ **Usar o App Oficial Instalado no seu Celular** (Google Gemini, ChatGPT ou Claude) com 1 toque;\n" +
-                    "2️⃣ **Ou ativar sua Chave Gratuita do Gemini 2.5** no botão de chave acima para gerar roteiros completos sem sair desta tela!"
+                text = "Olá! Sou seu **Co-Criador de Roteiros com IA** para gravação de vídeos.\n\n" +
+                    "Fale no microfone ou digite sobre o que você quer gravar hoje — podemos criar um roteiro do zero, estruturar ideias juntos ou deixar um texto que você já tem mais natural para ler na câmera!"
             )
         )
     )
@@ -263,12 +261,12 @@ class OnDeviceGeminiAssistant {
             if (cloudResult.isSuccess) {
                 val responseText = cloudResult.getOrDefault("").trim()
                 if (responseText.isNotBlank()) {
-                    val parsed = extractScriptBlock(responseText, trimmed)
+                    val parsed = parseConversationalAndScriptResponse(responseText, trimmed)
                     updateAssistantMessage(
                         id = assistantMsgId,
-                        text = responseText,
-                        extractedScript = parsed.first,
-                        suggestedTitle = parsed.second,
+                        text = parsed.displayChatText,
+                        extractedScript = parsed.cleanTeleprompterScript,
+                        suggestedTitle = parsed.suggestedTitle,
                         isStreaming = false
                     )
                     return
@@ -284,20 +282,21 @@ class OnDeviceGeminiAssistant {
                 client.generateContentStream(fullPrompt).collect { chunk ->
                     val piece = chunk.candidates.firstOrNull()?.text.orEmpty()
                     streamedText += piece
+                    val cleanLive = streamedText.replace("<roteiro>", "").replace("</roteiro>", "").trim()
                     updateAssistantMessage(
                         id = assistantMsgId,
-                        text = streamedText.ifBlank { "Pensando..." },
+                        text = cleanLive.ifBlank { "Escrevendo roteiro..." },
                         isStreaming = true
                     )
                 }
 
                 if (streamedText.isNotBlank()) {
-                    val parsed = extractScriptBlock(streamedText, trimmed)
+                    val parsed = parseConversationalAndScriptResponse(streamedText, trimmed)
                     updateAssistantMessage(
                         id = assistantMsgId,
-                        text = streamedText,
-                        extractedScript = parsed.first,
-                        suggestedTitle = parsed.second,
+                        text = parsed.displayChatText,
+                        extractedScript = parsed.cleanTeleprompterScript,
+                        suggestedTitle = parsed.suggestedTitle,
                         isStreaming = false
                     )
                     return
@@ -306,22 +305,41 @@ class OnDeviceGeminiAssistant {
             }
         }
 
-        // 3. PRIORITY 3: Built-in Direct Cloud LLM Engine (Returns full AI script directly inside the Teleprompter!)
-        val directCloudResult = callDirectCloudAiWithoutKey(
+        // 3. PRIORITY 3: Built-in Real-Time Streaming Cloud LLM Co-Creator (Fast, natural spoken scripts inside the app!)
+        val latestScriptInChat = _messages.value
+            .dropLast(2)
+            .lastOrNull { !it.isUser && !it.extractedScript.isNullOrBlank() }
+            ?.extractedScript
+            ?: currentScriptContent
+
+        val directCloudResult = streamDirectCloudAiWithoutKey(
             userMessage = trimmed,
             history = _messages.value.dropLast(2).takeLast(6),
             currentTitle = currentScriptTitle,
-            currentScript = currentScriptContent
+            currentScript = latestScriptInChat,
+            onPartialText = { partialRaw ->
+                val liveDisplay = partialRaw
+                    .replace("<roteiro>", "\n\n🎬 **Roteiro para o Teleprompter:**\n")
+                    .replace("</roteiro>", "\n")
+                    .trim()
+                if (liveDisplay.isNotBlank()) {
+                    updateAssistantMessage(
+                        id = assistantMsgId,
+                        text = liveDisplay,
+                        isStreaming = true
+                    )
+                }
+            }
         )
         if (directCloudResult.isSuccess) {
             val responseText = directCloudResult.getOrDefault("").trim()
             if (responseText.isNotBlank()) {
-                val parsed = extractScriptBlock(responseText, trimmed)
+                val parsed = parseConversationalAndScriptResponse(responseText, trimmed)
                 updateAssistantMessage(
                     id = assistantMsgId,
-                    text = responseText,
-                    extractedScript = parsed.first,
-                    suggestedTitle = parsed.second,
+                    text = parsed.displayChatText,
+                    extractedScript = parsed.cleanTeleprompterScript,
+                    suggestedTitle = parsed.suggestedTitle,
                     isStreaming = false
                 )
                 return
@@ -329,74 +347,140 @@ class OnDeviceGeminiAssistant {
         }
 
         // 4. PRIORITY 4: Offline fallback (Only when device has no internet connection)
-        delay(200)
+        delay(150)
         val generated = generateSmartOnDeviceResponse(
             userRequest = trimmed,
             currentTitle = currentScriptTitle,
-            currentScript = currentScriptContent
+            currentScript = latestScriptInChat
         )
         updateAssistantMessage(
             id = assistantMsgId,
-            text = "📴 *(Modo Offline Sem Internet)* " + generated.explanation + "\n\n" + generated.scriptContent,
+            text = generated.explanation,
             extractedScript = generated.scriptContent,
             suggestedTitle = generated.title,
             isStreaming = false
         )
     }
 
-    private suspend fun callDirectCloudAiWithoutKey(
+    private suspend fun streamDirectCloudAiWithoutKey(
         userMessage: String,
         history: List<AiChatMessage>,
         currentTitle: String?,
-        currentScript: String?
+        currentScript: String?,
+        onPartialText: (String) -> Unit
     ): Result<String> = withContext(Dispatchers.IO) {
         try {
             val systemInstructions = buildString {
-                appendLine("Você é o motor oficial de Inteligência Artificial do aplicativo Pro Teleprompter Studio.")
-                appendLine("Sua missão é criar, editar ou adaptar roteiros prontos para leitura fluente em voz alta no Teleprompter em Português do Brasil.")
-                appendLine("REGRAS OBRIGATÓRIAS DE FORMATAÇÃO PARA O TELEPROMPTER:")
-                appendLine("1. NÃO use tabelas Markdown (| coluna |). Escreva sempre em texto corrido de locução pronto para ser lido na câmera.")
-                appendLine("2. Divida as partes do roteiro usando: === NOME DO BLOCO === (ex: === ABERTURA ===, === DESENVOLVIMENTO ===, === ENCERRAMENTO ===).")
-                appendLine("3. Insira dicas curtas de direção e expressão entre [DICA] e [/DICA] (ex: [DICA]Olhar firme na lente, tom entusiasmado[/DICA]).")
-                appendLine("4. Destaque palavras ou frases importantes usando [DESTAQUE]texto[/DESTAQUE] ou [ALERTA]texto de forte impacto[/ALERTA].")
-                appendLine("5. Insira pausas de respiração estratégicas usando [PAUSA 2s] ou [PAUSA 3s].")
-                appendLine("6. Seja profundo, criativo, natural e completo, entregando exatamente o conteúdo que o usuário pediu.")
+                appendLine("Você é um Parceiro Criativo e Roteirista Profissional especialista em gravação de vídeos com Teleprompter.")
+                appendLine("Converse sempre em Português do Brasil de forma natural, acolhedora, inteligente e direta.")
+                appendLine("COMO AJUDAR O USUÁRIO:")
+                appendLine("1. Você pode tanto criar um roteiro completo do zero quanto ajudar o usuário a construir, refinar, encurtar, expandir ou melhorar ideias de vídeo passo a passo.")
+                appendLine("2. Sempre que você entregar ou atualizar um roteiro para ser lido na câmera, coloque o texto falado dentro das tags <roteiro> e </roteiro>.")
+                appendLine("3. DENTRO de <roteiro>...</roteiro>, escreva APENAS o texto falado natural, fluido e humano — exatamente como a pessoa vai falar olhando para a lente da câmera ao gravar o vídeo.")
+                appendLine("4. Separe as frases do <roteiro> em parágrafos curtos e respiráveis para facilitar a leitura no Teleprompter. NÃO use tabelas, NÃO use asteriscos (**), NÃO use títulos com # e NÃO use códigos técnicos dentro do <roteiro> (a menos que o usuário peça expressamente pausas [PAUSA 2s]).")
+                appendLine("5. FORA da tag <roteiro>, seja breve (1 a 3 frases): comente de forma natural sobre a escolha do gancho/ritmo ou pergunte se o usuário quer ajustar alguma parte antes de gravar.")
                 if (!currentScript.isNullOrBlank()) {
                     appendLine()
-                    appendLine("ROTEIRO ATUAL ABERTO NO EDITOR (${currentTitle ?: "Sem título"}):")
-                    appendLine(currentScript)
+                    appendLine("ROTEIRO ATUAL EM TRABALHO (${currentTitle ?: "Roteiro Atual"}):")
+                    appendLine(currentScript.take(1500))
                 }
             }
 
-            val endpoint = "https://text.pollinations.ai/openai"
-            val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+            val messagesJson = buildJsonArray {
+                add(buildJsonObject {
+                    put("role", "system")
+                    put("content", systemInstructions)
+                })
+                history.takeLast(4).forEach { msg ->
+                    add(buildJsonObject {
+                        put("role", if (msg.isUser) "user" else "assistant")
+                        val contentForHistory = if (!msg.isUser && !msg.extractedScript.isNullOrBlank()) {
+                            "${msg.text.take(250)}\n<roteiro>\n${msg.extractedScript.take(800)}\n</roteiro>"
+                        } else {
+                            msg.text.take(500)
+                        }
+                        put("content", contentForHistory)
+                    })
+                }
+                add(buildJsonObject {
+                    put("role", "user")
+                    put("content", userMessage)
+                })
+            }
+
+            // First try real-time SSE streaming with low reasoning effort for instant response (<1.5s first token)
+            val streamEndpoint = "https://text.pollinations.ai/openai"
+            val streamConn = (URL(streamEndpoint).openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
-                connectTimeout = 15000
-                readTimeout = 35000
+                connectTimeout = 10000
+                readTimeout = 25000
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+                setRequestProperty("Accept", "text/event-stream")
+            }
+
+            val streamPayload = buildJsonObject {
+                put("model", "openai-fast")
+                put("reasoning_effort", "low")
+                put("stream", true)
+                put("temperature", 0.7)
+                put("messages", messagesJson)
+            }.toString()
+
+            OutputStreamWriter(streamConn.outputStream, Charsets.UTF_8).use { it.write(streamPayload) }
+
+            val streamCode = streamConn.responseCode
+            if (streamCode in 200..299) {
+                val accumulated = StringBuilder()
+                streamConn.inputStream.bufferedReader(Charsets.UTF_8).useLines { lines ->
+                    lines.forEach { rawLine ->
+                        val line = rawLine.trim()
+                        if (line.startsWith("data:")) {
+                            val dataPayload = line.removePrefix("data:").trim()
+                            if (dataPayload.isNotEmpty() && dataPayload != "[DONE]") {
+                                try {
+                                    val chunkObj = json.parseToJsonElement(dataPayload).jsonObject
+                                    val deltaContent = chunkObj["choices"]
+                                        ?.jsonArray
+                                        ?.firstOrNull()
+                                        ?.jsonObject
+                                        ?.get("delta")
+                                        ?.jsonObject
+                                        ?.get("content")
+                                        ?.jsonPrimitive
+                                        ?.content
+                                        .orEmpty()
+                                    if (deltaContent.isNotEmpty()) {
+                                        accumulated.append(deltaContent)
+                                        onPartialText(accumulated.toString())
+                                    }
+                                } catch (_: Exception) {
+                                }
+                            }
+                        }
+                    }
+                }
+                val finalStreamed = accumulated.toString().trim()
+                if (finalStreamed.isNotBlank()) {
+                    return@withContext Result.success(finalStreamed)
+                }
+            }
+
+            // Fallback: non-streaming fast request with reasoning_effort = low
+            val conn = (URL(streamEndpoint).openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 10000
+                readTimeout = 25000
                 doOutput = true
                 setRequestProperty("Content-Type", "application/json; charset=UTF-8")
                 setRequestProperty("Accept", "application/json")
             }
 
             val payload = buildJsonObject {
-                put("model", "openai")
-                put("messages", buildJsonArray {
-                    add(buildJsonObject {
-                        put("role", "system")
-                        put("content", systemInstructions)
-                    })
-                    history.takeLast(4).forEach { msg ->
-                        add(buildJsonObject {
-                            put("role", if (msg.isUser) "user" else "assistant")
-                            put("content", msg.text.take(600))
-                        })
-                    }
-                    add(buildJsonObject {
-                        put("role", "user")
-                        put("content", userMessage)
-                    })
-                })
+                put("model", "openai-fast")
+                put("reasoning_effort", "low")
                 put("temperature", 0.7)
+                put("messages", messagesJson)
             }.toString()
 
             OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(payload) }
@@ -638,20 +722,18 @@ class OnDeviceGeminiAssistant {
             if (it.isUser) "Usuário: ${it.text}" else "Assistente: ${it.text.take(350)}"
         }
         val scriptContext = if (!currentScript.isNullOrBlank()) {
-            "\nRoteiro atual aberto (${currentTitle ?: "Sem título"}):\n$currentScript\n"
+            "\nRoteiro atual em trabalho (${currentTitle ?: "Sem título"}):\n$currentScript\n"
         } else {
             ""
         }
 
         return """
-            Você é um Diretor e Roteirista Profissional especialista em Teleprompter, TV, YouTube e Marketing Digital.
-            Responda em Português do Brasil com altíssima qualidade, profundidade, criatividade e naturalidade para leitura em voz alta.
-            Ao criar ou adaptar um roteiro para Teleprompter, estruture o texto usando as marcações de estúdio:
-            - === NOME DO BLOCO === para dividir as seções do roteiro
-            - [DICA]orientação de expressão, entonação ou câmera[/DICA]
-            - [DESTAQUE]palavras ou frases com ênfase positiva[/DESTAQUE]
-            - [ALERTA]frases de impacto ou atenção máxima[/ALERTA]
-            - [PAUSA 2s] ou [PAUSA 3s] entre ideias importantes.
+            Você é um Parceiro Criativo e Roteirista Profissional especialista em gravação de vídeos com Teleprompter.
+            Converse em Português do Brasil de forma natural, acolhedora, inteligente e direta.
+            1. Você pode tanto criar um roteiro completo quanto ajudar o usuário a construir, refinar, encurtar ou melhorar ideias de vídeo passo a passo.
+            2. Sempre que entregar ou atualizar um roteiro para o usuário ler na câmera, coloque o texto falado dentro de <roteiro> e </roteiro>.
+            3. Dentro de <roteiro>...</roteiro>, escreva APENAS o texto falado natural, fluido e humano — exatamente como a pessoa vai falar olhando para a lente da câmera ao gravar o vídeo, dividido em parágrafos curtos.
+            4. Fora da tag <roteiro>, seja breve (1 a 3 frases): comente ou pergunte se o usuário quer ajustar o tom antes de gravar.
             $scriptContext
             Histórico recente da conversa:
             $historyContext
@@ -660,18 +742,65 @@ class OnDeviceGeminiAssistant {
         """.trimIndent()
     }
 
-    private fun extractScriptBlock(rawResponse: String, userRequest: String): Pair<String, String> {
-        var cleaned = rawResponse
+    private data class ParsedAiScriptResponse(
+        val displayChatText: String,
+        val cleanTeleprompterScript: String?,
+        val suggestedTitle: String
+    )
+
+    private fun parseConversationalAndScriptResponse(
+        rawResponse: String,
+        userRequest: String
+    ): ParsedAiScriptResponse {
+        val strippedCodeFences = rawResponse
+            .replace("```xml", "")
             .replace("```text", "")
             .replace("```markdown", "")
             .replace("```", "")
+            .trim()
+
+        val tagRegex = Regex("""<roteiro>([\s\S]*?)</roteiro>""", RegexOption.IGNORE_CASE)
+        val match = tagRegex.find(strippedCodeFences)
+
+        val rawScriptBlock = if (match != null) {
+            match.groupValues[1].trim()
+        } else {
+            // If LLM didn't wrap in <roteiro>, extract spoken text cleanly
+            strippedCodeFences
+                .lines()
+                .filterNot { line ->
+                    val trimmed = line.trim()
+                    trimmed.startsWith("|") || trimmed.startsWith("---")
+                }
+                .joinToString("\n")
+                .trim()
+        }
+
+        val cleanSpokenScript = rawScriptBlock
+            .replace("**", "")
+            .replace(Regex("""^#+\s*""", RegexOption.MULTILINE), "")
+            .replace(Regex("""^"(.*)"$""", RegexOption.DOT_MATCHES_ALL), "$1")
             .replace(Regex("""\[pausa\s*:?\s*(\d+)s?\]""", RegexOption.IGNORE_CASE), "[PAUSA $1s]")
             .trim()
-        if (!cleaned.contains("[PAUSA")) {
-            cleaned = "$cleaned\n[PAUSA 2s]"
+
+        val conversationalNotes = if (match != null) {
+            strippedCodeFences.replace(match.value, "").trim()
+        } else {
+            "Aqui está uma sugestão de roteiro natural pronta para leitura na câmera. Você pode pedir ajustes ou abrir direto no Teleprompter para gravar:"
         }
+
+        val finalDisplayText = if (conversationalNotes.isNotBlank()) {
+            conversationalNotes
+        } else {
+            "Preparei o roteiro com linguagem natural para você gravar no Teleprompter:"
+        }
+
         val title = inferTopicTitle(userRequest)
-        return cleaned to title
+        return ParsedAiScriptResponse(
+            displayChatText = finalDisplayText,
+            cleanTeleprompterScript = cleanSpokenScript.ifBlank { null },
+            suggestedTitle = title
+        )
     }
 
     private data class GeneratedScriptResult(
@@ -685,69 +814,38 @@ class OnDeviceGeminiAssistant {
         currentTitle: String?,
         currentScript: String?
     ): GeneratedScriptResult {
-        val lower = userRequest.lowercase(Locale.forLanguageTag("pt-BR"))
         val topic = inferTopicTitle(userRequest)
 
-        if (!currentScript.isNullOrBlank() && (
-                lower.contains("pausa") ||
-                    lower.contains("melhor") ||
-                    lower.contains("destaque") ||
-                    lower.contains("adapte") ||
-                    lower.contains("atual") ||
-                    lower.contains("resum") ||
-                    lower.contains("dinâmic") ||
-                    lower.contains("dinamic")
-                )
-        ) {
+        if (!currentScript.isNullOrBlank()) {
             val paragraphs = currentScript
                 .lines()
                 .map { it.trim() }
                 .filter { it.isNotBlank() && !it.startsWith("===") }
 
-            val enhanced = buildString {
-                appendLine("=== ABERTURA DINÂMICA ===")
-                appendLine("[DICA]Energia alta, olhar centralizado na lente[/DICA]")
-                paragraphs.forEachIndexed { idx, line ->
-                    if (idx == 1 && paragraphs.size > 2) {
-                        appendLine()
-                        appendLine("=== PONTO PRINCIPAL ===")
-                    }
-                    appendLine(line.trim())
-                    appendLine("[PAUSA 2s]")
-                    appendLine()
-                }
-                appendLine("=== CHAMADA FINAL ===")
-                appendLine("[ALERTA]Gostou? Coloque em prática agora mesmo e compartilhe![/ALERTA]")
-            }.trim()
+            val enhanced = paragraphs.joinToString("\n\n") { line ->
+                line.trim()
+            }
 
             return GeneratedScriptResult(
-                title = currentTitle ?: "Roteiro Otimizado com IA",
-                explanation = "Roteiro estruturado localmente com **blocos de leitura** e **pausas (`[PAUSA 2s]`)**:",
+                title = currentTitle ?: "Roteiro: $topic",
+                explanation = "Ajustei o seu roteiro deixando a leitura mais fluida e natural para a câmera:",
                 scriptContent = enhanced
             )
         }
 
         val script = """
-            === ABERTURA & GANCHO ===
-            [DICA]Olhar firme na lente da câmera, tom natural e seguro[/DICA]
-            Olá pessoal! Hoje vamos falar diretamente sobre: [DESTAQUE]$userRequest[/DESTAQUE].
-            [PAUSA 2s]
+            Olá, pessoal! Tudo bem com vocês? Hoje eu quero conversar de forma bem direta sobre $topic.
 
-            === DESENVOLVIMENTO PRINCIPAL ===
-            Quando analisamos esse tema na prática, percebemos que [ALERTA]a clareza e a objetividade na comunicação[/ALERTA] são fundamentais para conectar com quem está assistindo.
-            [PAUSA 2s]
+            Muita gente tem dúvida de por onde começar quando o assunto é esse, mas a verdade é que pequenos passos bem aplicados no dia a dia fazem toda a diferença no resultado final.
 
-            [DICA]Mudar levemente a entonação para destacar os próximos pontos[/DICA]
-            Por isso, separei os pontos essenciais sobre [DESTAQUE]$topic[/DESTAQUE] para você aplicar imediatamente com segurança e resultado.
-            [PAUSA 3s]
+            Por isso, eu preparei este vídeo para compartilhar com você o que realmente funciona na prática, de um jeito simples, rápido e fácil de aplicar agora mesmo.
 
-            === ENCERRAMENTO & CHAMADA (CTA) ===
-            Se este conteúdo fez sentido para você, deixe seu comentário, compartilhe e inscreva-se para acompanhar os próximos vídeos!
+            Se esse conteúdo te ajudou, já deixa o seu curtir aqui embaixo, comenta a sua opinião e compartilha com quem também precisa ver isso. Até o próximo vídeo!
         """.trimIndent()
 
         return GeneratedScriptResult(
             title = "Roteiro: $topic",
-            explanation = "Rascunho base estruturado para **$topic**:",
+            explanation = "Preparei uma base natural e conversada sobre **$topic** pronta para ler e gravar no Teleprompter:",
             scriptContent = script
         )
     }
@@ -762,11 +860,11 @@ class OnDeviceGeminiAssistant {
             match
         } else {
             userRequest
-                .replace(Regex("""^(crie|criar|faça|fazer|gere|gerar|escreva|escrever|um|uma|roteiro|video|vídeo)\s+""", RegexOption.IGNORE_CASE), "")
+                .replace(Regex("""^(me\s+ajude\s+a\s+criar|crie|criar|faça|fazer|gere|gerar|escreva|escrever|um|uma|roteiro|video|vídeo)\s+""", RegexOption.IGNORE_CASE), "")
                 .trim()
         }
         return raw.take(42).replaceFirstChar {
             if (it.isLowerCase()) it.titlecase(Locale.getDefault()) else it.toString()
-        }.ifBlank { "Produção de Estúdio" }
+        }.ifBlank { "Produção de Vídeo" }
     }
 }

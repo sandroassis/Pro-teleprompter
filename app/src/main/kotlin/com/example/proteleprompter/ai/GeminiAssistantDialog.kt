@@ -694,17 +694,17 @@ fun GeminiAssistantPanel(
         ) {
             val suggestions = if (!currentScriptContent.isNullOrBlank()) {
                 listOf(
-                    "Melhore o roteiro atual e adicione pausas",
-                    "Adapte para Reels/TikTok de 30 segundos",
-                    "Transforme em estilo de Telejornal",
-                    "Crie um Pitch Comercial persuasivo"
+                    "Deixe este roteiro mais natural e conversado para gravar",
+                    "Adapte para um vídeo curto de 30s (Reels/TikTok)",
+                    "Melhore a abertura com um gancho que prenda a atenção",
+                    "Me dê 3 ideias de como encerrar este vídeo"
                 )
             } else {
                 listOf(
-                    "Crie um roteiro para YouTube sobre Inteligência Artificial",
-                    "Roteiro curto de 30s para Reels sobre marketing digital",
-                    "Notícia de telejornal sobre inovação e tecnologia",
-                    "Pitch de vendas de 1 minuto para apresentar meu serviço"
+                    "Me ajude a criar um roteiro natural de 1 minuto para YouTube",
+                    "Crie um roteiro curto de 30s para Reels apresentando meu trabalho",
+                    "Quero gravar um vídeo vendendo um produto, me ajude no roteiro",
+                    "Crie um roteiro dinâmico de notícia / informativo"
                 )
             }
 
@@ -758,6 +758,9 @@ fun GeminiAssistantPanel(
                                 currentScript = currentScriptContent
                             )
                         }
+                    },
+                    onQuickRefine = { refinementRequest ->
+                        submitPrompt(refinementRequest)
                     },
                     onApplyScript = { title, content, startNow ->
                         onApplyScript(title, content, startNow)
@@ -993,6 +996,7 @@ private fun ChatBubbleItem(
     hasExistingScript: Boolean,
     installedAiApp: ExternalAiProvider?,
     onOpenInInstalledApp: (String) -> Unit,
+    onQuickRefine: (String) -> Unit,
     onApplyScript: (title: String, scriptContent: String, startImmediately: Boolean) -> Unit
 ) {
     val alignment = if (message.isUser) Alignment.End else Alignment.Start
@@ -1020,7 +1024,7 @@ private fun ChatBubbleItem(
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
                 Text(
-                    text = if (message.isUser) "Você" else "✨ Assistente IA (Roteirista)",
+                    text = if (message.isUser) "Você" else "✨ Co-Criador IA (Roteirista)",
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Bold,
                     color = if (message.isUser) BroadcastCyan else BroadcastAmber
@@ -1033,32 +1037,96 @@ private fun ChatBubbleItem(
                     lineHeight = 20.sp
                 )
 
-                // If this is a user message and an official AI app is installed, offer 1-tap launch into that app
-                if (message.isUser && installedAiApp != null) {
-                    Spacer(Modifier.height(6.dp))
-                    AssistChip(
-                        onClick = { onOpenInInstalledApp(message.text) },
-                        label = {
-                            Text(
-                                text = "Enviar para ${installedAiApp.displayName}",
-                                fontSize = 11.sp,
-                                color = BroadcastCyan
-                            )
-                        },
-                        leadingIcon = {
-                            Icon(
-                                Icons.AutoMirrored.Filled.OpenInNew,
-                                contentDescription = null,
-                                tint = BroadcastCyan,
-                                modifier = Modifier.size(14.dp)
-                            )
-                        }
-                    )
-                }
-
                 val scriptCandidate = message.extractedScript
                 if (!message.isUser && !message.isStreaming && !scriptCandidate.isNullOrBlank()) {
                     val title = message.suggestedTitle ?: "Roteiro Gerado por IA"
+                    val wordCount = scriptCandidate.split(Regex("""\s+""")).count { it.isNotBlank() }
+                    val estimatedSeconds = ((wordCount / 140f) * 60f).toInt().coerceAtLeast(5)
+                    val mins = estimatedSeconds / 60
+                    val secs = estimatedSeconds % 60
+                    val durationBadge = "%02d:%02d".format(mins, secs)
+
+                    Spacer(Modifier.height(10.dp))
+
+                    // Dedicated Clean Teleprompter Spoken Script Preview Card
+                    Surface(
+                        color = StudioBlack,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, BroadcastCyan.copy(alpha = 0.45f), RoundedCornerShape(12.dp))
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "🎬 TEXTO FALADO (TELEPROMPTER)",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = BroadcastCyan
+                                )
+                                Text(
+                                    text = "⏱ ~$durationBadge • $wordCount pal.",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = BroadcastAmber
+                                )
+                            }
+                            HorizontalDivider(
+                                modifier = Modifier.padding(vertical = 6.dp),
+                                color = StudioBorder
+                            )
+                            Text(
+                                text = scriptCandidate,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = Color(0xFFF8FAFC),
+                                lineHeight = 22.sp
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    // Interactive Co-Creation Refinement Chips
+                    Text(
+                        text = "Ajustar roteiro com a IA:",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF94A3B8)
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        val refinements = listOf(
+                            "✨ Mais natural e conversado" to "Deixe esse roteiro ainda mais natural, fluido e conversado, como uma conversa real olhando para a câmera.",
+                            "⏱ Encurtar p/ 30s" to "Enxugue e adapte esse roteiro para caber em 30 segundos mantendo o impacto principal.",
+                            "🔥 Melhorar abertura" to "Crie um gancho inicial mais forte nas primeiras frases desse roteiro para prender a atenção logo nos 3 primeiros segundos.",
+                            "📈 Desenvolver mais" to "Expanda e desenvolva um pouco mais os argumentos desse roteiro com exemplos práticos.",
+                            "⏸ Inserir pausas" to "Mantenha o texto natural desse roteiro e adicione marcações [PAUSA 2s] nos melhores momentos de respiração."
+                        )
+                        refinements.forEach { (chipLabel, promptCommand) ->
+                            AssistChip(
+                                onClick = { onQuickRefine(promptCommand) },
+                                label = {
+                                    Text(
+                                        text = chipLabel,
+                                        fontSize = 11.sp,
+                                        color = BroadcastCyan
+                                    )
+                                },
+                                colors = AssistChipDefaults.assistChipColors(
+                                    containerColor = StudioCard
+                                )
+                            )
+                        }
+                    }
+
                     HorizontalDivider(
                         modifier = Modifier.padding(vertical = 8.dp),
                         color = StudioBorder
@@ -1078,7 +1146,7 @@ private fun ChatBubbleItem(
                             )
                             Spacer(Modifier.width(4.dp))
                             Text(
-                                text = if (hasExistingScript) "Usar no Editor" else "Salvar Roteiro",
+                                text = if (hasExistingScript) "Usar no Editor" else "Editar Roteiro",
                                 fontSize = 12.sp
                             )
                         }
@@ -1089,7 +1157,7 @@ private fun ChatBubbleItem(
                                 containerColor = BroadcastGreen,
                                 contentColor = Color(0xFF042217)
                             ),
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.weight(1.3f)
                         ) {
                             Icon(
                                 Icons.Default.PlayArrow,
@@ -1098,9 +1166,9 @@ private fun ChatBubbleItem(
                             )
                             Spacer(Modifier.width(4.dp))
                             Text(
-                                text = "Abrir no Prompter",
+                                text = "Gravar Vídeo no Prompter",
                                 fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold
+                                fontWeight = FontWeight.ExtraBold
                             )
                         }
                     }
