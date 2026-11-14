@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -36,6 +37,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AutoAwesome
@@ -74,8 +77,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -307,21 +314,32 @@ fun GeminiAssistantPanel(
     val messages by assistant.messages.collectAsState()
     val listState = rememberLazyListState()
 
-    var inputPrompt by remember { mutableStateOf("") }
+    var inputField by remember { mutableStateOf(TextFieldValue("")) }
     var isGenerating by remember { mutableStateOf(false) }
+    val inputScrollState = rememberScrollState()
 
     val micController = remember(context) {
         ContinuousAiMicController(context) { liveDictatedText ->
-            inputPrompt = liveDictatedText
+            inputField = TextFieldValue(
+                text = liveDictatedText,
+                selection = TextRange(liveDictatedText.length)
+            )
         }
     }
     val isMicActive by micController.isMicActive.collectAsState()
+
+    // Always keep the latest dictated words & cursor scrolled into view
+    LaunchedEffect(inputField.text, inputScrollState.maxValue) {
+        if (isMicActive || inputField.selection.end >= inputField.text.length - 2) {
+            inputScrollState.scrollTo(inputScrollState.maxValue)
+        }
+    }
 
     val audioPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) {
-            micController.startContinuousListening(inputPrompt)
+            micController.startContinuousListening(inputField.text)
         }
     }
 
@@ -351,7 +369,7 @@ fun GeminiAssistantPanel(
             ) == PackageManager.PERMISSION_GRANTED
 
             if (hasPermission) {
-                micController.startContinuousListening(inputPrompt)
+                micController.startContinuousListening(inputField.text)
             } else {
                 audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             }
@@ -364,7 +382,7 @@ fun GeminiAssistantPanel(
         }
         val clean = promptText.trim()
         if (clean.isEmpty() || isGenerating) return
-        inputPrompt = ""
+        inputField = TextFieldValue("")
         isGenerating = true
         scope.launch {
             assistant.sendUserMessage(
@@ -586,30 +604,55 @@ fun GeminiAssistantPanel(
                 )
             }
 
-            OutlinedTextField(
-                value = inputPrompt,
-                onValueChange = {
-                    inputPrompt = it
-                    micController.syncManualEdit(it)
-                },
-                placeholder = {
-                    Text(
-                        if (isMicActive) {
-                            "Ouvindo continuamente... fale no seu ritmo e clique no microfone para parar"
-                        } else {
-                            "Converse com a IA (ex: 'Crie um vídeo sobre finanças')..."
-                        },
-                        fontSize = 13.sp
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 52.dp, max = 210.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(StudioSurface)
+                    .border(
+                        width = 1.dp,
+                        color = if (isMicActive) BroadcastCyan else StudioBorder,
+                        shape = RoundedCornerShape(14.dp)
                     )
-                },
-                maxLines = 4,
-                shape = RoundedCornerShape(14.dp),
-                modifier = Modifier.weight(1f)
-            )
+                    .verticalScroll(inputScrollState)
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                BasicTextField(
+                    value = inputField,
+                    onValueChange = {
+                        inputField = it
+                        micController.syncManualEdit(it.text)
+                    },
+                    textStyle = TextStyle(
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        lineHeight = 22.sp
+                    ),
+                    cursorBrush = SolidColor(BroadcastCyan),
+                    modifier = Modifier.fillMaxWidth(),
+                    decorationBox = { innerTextField ->
+                        if (inputField.text.isEmpty()) {
+                            Text(
+                                text = if (isMicActive) {
+                                    "Ouvindo continuamente... fale no seu ritmo e clique no microfone para parar"
+                                } else {
+                                    "Converse com a IA (ex: 'Crie um vídeo sobre finanças')..."
+                                },
+                                color = Color.Gray,
+                                fontSize = 13.sp,
+                                lineHeight = 18.sp
+                            )
+                        }
+                        innerTextField()
+                    }
+                )
+            }
 
             Button(
-                onClick = { submitPrompt(inputPrompt) },
-                enabled = inputPrompt.isNotBlank() && !isGenerating,
+                onClick = { submitPrompt(inputField.text) },
+                enabled = inputField.text.isNotBlank() && !isGenerating,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = BroadcastCyan,
                     contentColor = Color(0xFF041E2B)
