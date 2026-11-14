@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -61,7 +62,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -103,8 +103,10 @@ import kotlinx.coroutines.launch
 import java.util.Locale
 
 /**
- * Continuous microphone controller that keeps SpeechRecognizer active across pauses and silences
- * until the user explicitly clicks the microphone button to stop.
+ * Low-latency, real-time continuous microphone controller.
+ * Reuses a persistent SpeechRecognizer instance (avoiding service re-binding overhead),
+ * streams word-by-word partial & segment results immediately, and stays active across pauses
+ * until the user explicitly taps the microphone button to finish.
  */
 private class ContinuousAiMicController(
     private val context: Context,
@@ -114,15 +116,43 @@ private class ContinuousAiMicController(
     private var speechRecognizer: SpeechRecognizer? = null
     private var committedBaseText: String = ""
     private var latestPartialSegment: String = ""
+    private var isRestartScheduled = false
 
     private val _isMicActive = MutableStateFlow(false)
     val isMicActive: StateFlow<Boolean> = _isMicActive.asStateFlow()
 
+    private val recognitionIntent: Intent by lazy {
+        Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            )
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE,
+                Locale.forLanguageTag("pt-BR").toLanguageTag()
+            )
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            // Enable low-latency continuous dictation mode where supported
+            putExtra("android.speech.extra.DICTATION_MODE", true)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                putExtra(
+                    RecognizerIntent.EXTRA_ENABLE_FORMATTING,
+                    RecognizerIntent.FORMATTING_OPTIMIZE_LATENCY
+                )
+            }
+        }
+    }
+
     fun startContinuousListening(existingTextInField: String) {
         committedBaseText = existingTextInField.trim()
         latestPartialSegment = ""
+        isRestartScheduled = false
         _isMicActive.value = true
-        mainHandler.post { startNextRecognizerCycle() }
+        mainHandler.post {
+            ensureRecognizerCreated()
+            startListeningImmediate()
+        }
     }
 
     fun syncManualEdit(newText: String) {
@@ -134,6 +164,7 @@ private class ContinuousAiMicController(
     fun stopContinuousListening() {
         if (!_isMicActive.value && speechRecognizer == null) return
         _isMicActive.value = false
+        isRestartScheduled = false
         mainHandler.removeCallbacksAndMessages(null)
         if (latestPartialSegment.isNotBlank()) {
             committedBaseText = combineText(committedBaseText, latestPartialSegment)
@@ -149,109 +180,124 @@ private class ContinuousAiMicController(
         speechRecognizer = null
     }
 
-    private fun startNextRecognizerCycle() {
-        if (!_isMicActive.value) return
+    private fun ensureRecognizerCreated() {
+        if (speechRecognizer != null) return
         if (!SpeechRecognizer.isRecognitionAvailable(context)) {
             _isMicActive.value = false
             return
         }
 
+        val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
+        recognizer.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) {
+                isRestartScheduled = false
+            }
+
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+
+            override fun onEndOfSpeech() {
+                // Keep session alive; onResults or onError will seamlessly re-trigger listening
+            }
+
+            override fun onError(error: Int) {
+                if (!_isMicActive.value) return
+                // Commit any live partial words before seamless restart
+                if (latestPartialSegment.isNotBlank()) {
+                    committedBaseText = combineText(committedBaseText, latestPartialSegment)
+                    latestPartialSegment = ""
+                    onTextUpdated(committedBaseText)
+                }
+                // If recognizer service got busy/corrupted, recreate once; otherwise reuse immediately
+                if (error == SpeechRecognizer.ERROR_CLIENT || error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
+                    recreateRecognizerAndListen(60L)
+                } else {
+                    scheduleImmediateListen(15L)
+                }
+            }
+
+            override fun onResults(results: Bundle?) {
+                if (!_isMicActive.value) return
+                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                val finalSegment = matches?.firstOrNull()?.trim().orEmpty()
+                val segmentToCommit = finalSegment.ifBlank { latestPartialSegment }
+
+                if (segmentToCommit.isNotBlank()) {
+                    committedBaseText = combineText(committedBaseText, segmentToCommit)
+                    latestPartialSegment = ""
+                    onTextUpdated(committedBaseText)
+                }
+                // Zero-delay continuation on the same recognizer instance
+                scheduleImmediateListen(10L)
+            }
+
+            override fun onSegmentResults(segmentResults: Bundle) {
+                if (!_isMicActive.value) return
+                val matches = segmentResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                val segment = matches?.firstOrNull()?.trim().orEmpty()
+                if (segment.isNotBlank()) {
+                    committedBaseText = combineText(committedBaseText, segment)
+                    latestPartialSegment = ""
+                    onTextUpdated(committedBaseText)
+                }
+            }
+
+            override fun onEndOfSegmentedSession() {
+                if (!_isMicActive.value) return
+                scheduleImmediateListen(10L)
+            }
+
+            override fun onPartialResults(partialResults: Bundle?) {
+                if (!_isMicActive.value) return
+                val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                val partial = matches?.firstOrNull()?.trim().orEmpty()
+                if (partial.isNotBlank() && partial != latestPartialSegment) {
+                    latestPartialSegment = partial
+                    onTextUpdated(combineText(committedBaseText, partial))
+                }
+            }
+
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+        speechRecognizer = recognizer
+    }
+
+    private fun startListeningImmediate() {
+        if (!_isMicActive.value) return
         try {
-            speechRecognizer?.destroy()
-            val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
-            speechRecognizer = recognizer
-
-            recognizer.setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) {}
-                override fun onBeginningOfSpeech() {}
-                override fun onRmsChanged(rmsdB: Float) {}
-                override fun onBufferReceived(buffer: ByteArray?) {}
-
-                override fun onEndOfSpeech() {
-                    // Do not stop! Wait for onResults or onError to commit and auto-restart.
-                }
-
-                override fun onError(error: Int) {
-                    if (!_isMicActive.value) return
-                    // If user paused speaking after a partial phrase, preserve what was heard so far
-                    if (latestPartialSegment.isNotBlank()) {
-                        committedBaseText = combineText(committedBaseText, latestPartialSegment)
-                        latestPartialSegment = ""
-                        onTextUpdated(committedBaseText)
-                    }
-                    // Immediately restart listening so pauses never turn off the microphone
-                    scheduleRestartCycle(180L)
-                }
-
-                override fun onResults(results: Bundle?) {
-                    if (!_isMicActive.value) return
-                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    val finalSegment = matches?.firstOrNull()?.trim().orEmpty()
-                    val segmentToCommit = finalSegment.ifBlank { latestPartialSegment }
-
-                    if (segmentToCommit.isNotBlank()) {
-                        committedBaseText = combineText(committedBaseText, segmentToCommit)
-                        latestPartialSegment = ""
-                        onTextUpdated(committedBaseText)
-                    }
-                    // Keep listening continuously until user taps the mic button to finish
-                    scheduleRestartCycle(120L)
-                }
-
-                override fun onPartialResults(partialResults: Bundle?) {
-                    if (!_isMicActive.value) return
-                    val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    val partial = matches?.firstOrNull()?.trim().orEmpty()
-                    if (partial.isNotBlank()) {
-                        latestPartialSegment = partial
-                        onTextUpdated(combineText(committedBaseText, partial))
-                    }
-                }
-
-                override fun onEvent(eventType: Int, params: Bundle?) {}
-            })
-
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(
-                    RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                    RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-                )
-                putExtra(
-                    RecognizerIntent.EXTRA_LANGUAGE,
-                    Locale.forLanguageTag("pt-BR").toLanguageTag()
-                )
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-                // Extend silence thresholds so natural pauses don't cut off phrases prematurely
-                putExtra(
-                    RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS,
-                    15000L
-                )
-                putExtra(
-                    RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS,
-                    15000L
-                )
-                putExtra(
-                    RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS,
-                    15000L
-                )
-            }
-
-            recognizer.startListening(intent)
+            ensureRecognizerCreated()
+            speechRecognizer?.startListening(recognitionIntent)
         } catch (_: Exception) {
-            if (_isMicActive.value) {
-                scheduleRestartCycle(400L)
-            }
+            recreateRecognizerAndListen(80L)
         }
     }
 
-    private fun scheduleRestartCycle(delayMs: Long) {
+    private fun scheduleImmediateListen(delayMs: Long) {
+        if (!_isMicActive.value || isRestartScheduled) return
+        isRestartScheduled = true
+        mainHandler.postDelayed({
+            isRestartScheduled = false
+            if (_isMicActive.value) {
+                startListeningImmediate()
+            }
+        }, delayMs)
+    }
+
+    private fun recreateRecognizerAndListen(delayMs: Long) {
         if (!_isMicActive.value) return
         mainHandler.removeCallbacksAndMessages(null)
+        isRestartScheduled = true
         mainHandler.postDelayed({
-            if (_isMicActive.value) {
-                startNextRecognizerCycle()
+            isRestartScheduled = false
+            if (!_isMicActive.value) return@postDelayed
+            try {
+                speechRecognizer?.destroy()
+            } catch (_: Exception) {
             }
+            speechRecognizer = null
+            ensureRecognizerCreated()
+            startListeningImmediate()
         }, delayMs)
     }
 
@@ -328,7 +374,7 @@ fun GeminiAssistantPanel(
     }
     val isMicActive by micController.isMicActive.collectAsState()
 
-    // Always keep the latest dictated words & cursor scrolled into view
+    // Instant scroll to bottom whenever dictated text or line count updates
     LaunchedEffect(inputField.text, inputScrollState.maxValue) {
         if (isMicActive || inputField.selection.end >= inputField.text.length - 2) {
             inputScrollState.scrollTo(inputScrollState.maxValue)
@@ -566,7 +612,7 @@ fun GeminiAssistantPanel(
                     )
                     Spacer(Modifier.width(8.dp))
                     Text(
-                        text = "Microfone ativo (escuta contínua mesmo em pausas) • Toque no microfone para finalizar",
+                        text = "Microfone ativo em tempo real • Toque no microfone para finalizar",
                         style = MaterialTheme.typography.labelSmall,
                         color = Color.White,
                         fontWeight = FontWeight.SemiBold
@@ -636,7 +682,7 @@ fun GeminiAssistantPanel(
                         if (inputField.text.isEmpty()) {
                             Text(
                                 text = if (isMicActive) {
-                                    "Ouvindo continuamente... fale no seu ritmo e clique no microfone para parar"
+                                    "Ouvindo em tempo real... fale normalmente e clique no microfone para parar"
                                 } else {
                                     "Converse com a IA (ex: 'Crie um vídeo sobre finanças')..."
                                 },

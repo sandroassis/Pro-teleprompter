@@ -2,7 +2,10 @@ package com.example.proteleprompter.hardware
 
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -16,8 +19,10 @@ class VoiceScrollController(
     private val context: Context,
     private val onTargetProgressChanged: (Float) -> Unit
 ) {
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var speechRecognizer: SpeechRecognizer? = null
     private var isListeningRequested = false
+    private var isRestartScheduled = false
     private var indexedWords: List<IndexedWord> = emptyList()
     private var currentWordCursor = 0
 
@@ -26,6 +31,25 @@ class VoiceScrollController(
 
     private val _isListening = MutableStateFlow(false)
     val isListening: StateFlow<Boolean> = _isListening.asStateFlow()
+
+    private val recognitionIntent: Intent by lazy {
+        Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            )
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.forLanguageTag("pt-BR").toLanguageTag())
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            putExtra("android.speech.extra.DICTATION_MODE", true)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                putExtra(
+                    RecognizerIntent.EXTRA_ENABLE_FORMATTING,
+                    RecognizerIntent.FORMATTING_OPTIMIZE_LATENCY
+                )
+            }
+        }
+    }
 
     data class IndexedWord(
         val normalized: String,
@@ -58,12 +82,18 @@ class VoiceScrollController(
             return
         }
         isListeningRequested = true
-        launchRecognizerSession()
+        isRestartScheduled = false
+        mainHandler.post {
+            ensureRecognizerCreated()
+            startListeningImmediate()
+        }
     }
 
     fun stopListening() {
         isListeningRequested = false
+        isRestartScheduled = false
         _isListening.value = false
+        mainHandler.removeCallbacksAndMessages(null)
         try {
             speechRecognizer?.stopListening()
             speechRecognizer?.cancel()
@@ -73,81 +103,95 @@ class VoiceScrollController(
         speechRecognizer = null
     }
 
-    private fun launchRecognizerSession() {
+    private fun ensureRecognizerCreated() {
+        if (speechRecognizer != null) return
+        val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
+        recognizer.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) {
+                isRestartScheduled = false
+                _isListening.value = true
+            }
+
+            override fun onBeginningOfSpeech() {
+                _isListening.value = true
+            }
+
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+
+            override fun onEndOfSpeech() {}
+
+            override fun onError(error: Int) {
+                if (!isListeningRequested) return
+                if (error == SpeechRecognizer.ERROR_CLIENT || error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
+                    recreateRecognizerAndListen(60L)
+                } else {
+                    scheduleImmediateListen(15L)
+                }
+            }
+
+            override fun onResults(results: Bundle?) {
+                processBundle(results)
+                if (isListeningRequested) {
+                    scheduleImmediateListen(10L)
+                }
+            }
+
+            override fun onSegmentResults(segmentResults: Bundle) {
+                processBundle(segmentResults)
+            }
+
+            override fun onEndOfSegmentedSession() {
+                if (isListeningRequested) {
+                    scheduleImmediateListen(10L)
+                }
+            }
+
+            override fun onPartialResults(partialResults: Bundle?) {
+                processBundle(partialResults)
+            }
+
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+        speechRecognizer = recognizer
+    }
+
+    private fun startListeningImmediate() {
         if (!isListeningRequested) return
         try {
-            speechRecognizer?.destroy()
-            val recognizer = SpeechRecognizer.createSpeechRecognizer(context)
-            speechRecognizer = recognizer
-
-            recognizer.setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) {
-                    _isListening.value = true
-                }
-
-                override fun onBeginningOfSpeech() {
-                    _isListening.value = true
-                }
-
-                override fun onRmsChanged(rmsdB: Float) {}
-                override fun onBufferReceived(buffer: ByteArray?) {}
-
-                override fun onEndOfSpeech() {
-                    if (isListeningRequested) {
-                        restartListeningSafely()
-                    }
-                }
-
-                override fun onError(error: Int) {
-                    if (isListeningRequested) {
-                        restartListeningSafely()
-                    }
-                }
-
-                override fun onResults(results: Bundle?) {
-                    processBundle(results)
-                    if (isListeningRequested) {
-                        restartListeningSafely()
-                    }
-                }
-
-                override fun onPartialResults(partialResults: Bundle?) {
-                    processBundle(partialResults)
-                }
-
-                override fun onEvent(eventType: Int, params: Bundle?) {}
-            })
-
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(
-                    RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                    RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-                )
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.forLanguageTag("pt-BR").toLanguageTag())
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-            }
-            recognizer.startListening(intent)
+            ensureRecognizerCreated()
+            speechRecognizer?.startListening(recognitionIntent)
         } catch (_: Exception) {
-            _isListening.value = false
+            recreateRecognizerAndListen(80L)
         }
     }
 
-    private fun restartListeningSafely() {
-        if (!isListeningRequested) return
-        try {
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(
-                    RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                    RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-                )
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.forLanguageTag("pt-BR").toLanguageTag())
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+    private fun scheduleImmediateListen(delayMs: Long) {
+        if (!isListeningRequested || isRestartScheduled) return
+        isRestartScheduled = true
+        mainHandler.postDelayed({
+            isRestartScheduled = false
+            if (isListeningRequested) {
+                startListeningImmediate()
             }
-            speechRecognizer?.startListening(intent)
-        } catch (_: Exception) {
-            launchRecognizerSession()
-        }
+        }, delayMs)
+    }
+
+    private fun recreateRecognizerAndListen(delayMs: Long) {
+        if (!isListeningRequested) return
+        mainHandler.removeCallbacksAndMessages(null)
+        isRestartScheduled = true
+        mainHandler.postDelayed({
+            isRestartScheduled = false
+            if (!isListeningRequested) return@postDelayed
+            try {
+                speechRecognizer?.destroy()
+            } catch (_: Exception) {
+            }
+            speechRecognizer = null
+            ensureRecognizerCreated()
+            startListeningImmediate()
+        }, delayMs)
     }
 
     private fun processBundle(bundle: Bundle?) {
@@ -159,12 +203,12 @@ class VoiceScrollController(
         val spokenTokens = phrase
             .split(Regex("""\s+"""))
             .map { normalizeWord(it) }
-            .filter { it.length >= 3 }
+            .filter { it.length >= 2 }
 
         if (spokenTokens.isEmpty() || indexedWords.isEmpty()) return
 
         val lastTokens = spokenTokens.takeLast(3)
-        val searchStart = (currentWordCursor - 4).coerceAtLeast(0)
+        val searchStart = (currentWordCursor - 3).coerceAtLeast(0)
         val searchEnd = (currentWordCursor + 36).coerceAtMost(indexedWords.lastIndex)
 
         var bestMatchIndex = -1
@@ -187,4 +231,3 @@ class VoiceScrollController(
             .replace(Regex("""[^\p{L}\p{N}]"""), "")
     }
 }
-
