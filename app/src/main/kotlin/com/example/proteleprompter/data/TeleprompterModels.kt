@@ -187,6 +187,20 @@ object ScriptParser {
      * - === TÓPICO === -> Section header divider
      * - [? PERGUNTA] ¿ / [! EXCLAMAÇÃO] ¡ / [. AFIRMAÇÃO] / [... SUSPENSE] -> Radio Announcer anticipated intonation cues
      */
+    fun normalizeUnclosedTags(rawText: String): String {
+        return rawText.lines().joinToString("\n") { line ->
+            var fixed = line
+            listOf("DICA", "ALERTA", "DESTAQUE").forEach { tag ->
+                val openRegex = Regex("""\[$tag]\s*""", RegexOption.IGNORE_CASE)
+                val closeRegex = Regex("""\[/$tag]""", RegexOption.IGNORE_CASE)
+                if (openRegex.containsMatchIn(fixed) && !closeRegex.containsMatchIn(fixed)) {
+                    fixed = fixed.replace(openRegex, "[$tag]").trimEnd() + "[/$tag]"
+                }
+            }
+            fixed
+        }
+    }
+
     fun buildStyledScript(
         rawText: String,
         defaultTextColor: Color = Color.White,
@@ -194,7 +208,7 @@ object ScriptParser {
     ): AnnotatedString {
         return buildAnnotatedString {
             var cursor = 0
-            val text = rawText
+            val text = normalizeUnclosedTags(rawText)
             val tokenRegex = Regex(
                 """(\[DESTAQUE](.*?)\[/DESTAQUE])|(\[ALERTA](.*?)\[/ALERTA])|(\[DICA](.*?)\[/DICA])|(\[PAUSA\s+(\d+)s])|(===\s*(.*?)\s*===)|(\[\?\s*([^\]]*)]\s*¿?)|(\[\!\s*([^\]]*)]\s*¡?)|(\[\.\.\.\s*([^\]]*)])|(\[\.\s*([^\]]*)])""",
                 setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
@@ -379,7 +393,7 @@ object ScriptParser {
 
     fun formatAsTvStudio(rawScript: String): String {
         // Strip radio anticipated punctuation markers if converting from Radio mode
-        var cleaned = rawScript
+        var cleaned = normalizeUnclosedTags(rawScript)
             .replace(radioPrefixRegex, "")
             .replace(Regex("""^\s*[¿¡]\s*""", RegexOption.MULTILINE), "")
             .trim()

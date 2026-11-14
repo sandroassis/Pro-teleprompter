@@ -478,182 +478,123 @@ fun GeminiAssistantPanel(
     Column(
         modifier = modifier
             .background(StudioBlack)
-            .padding(14.dp)
+            .padding(horizontal = 10.dp, vertical = 6.dp)
     ) {
-        // Header with AI Engine Status + API Key Setup Button
+        // Single Sleek Top Control Bar: Format Selector (TV vs Radio) + Quick Action Icons
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.weight(1f),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(
-                    contentAlignment = Alignment.Center,
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(BroadcastCyan.copy(alpha = 0.18f))
-                ) {
-                    Icon(
-                        Icons.Default.AutoAwesome,
-                        contentDescription = null,
-                        tint = BroadcastCyan,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-                Spacer(Modifier.width(10.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Central de IA (Gemini / ChatGPT / Claude)",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = Color.White,
-                        maxLines = 1
-                    )
-                    Text(
-                        text = downloadProgress ?: status.badgeText,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (status.isHardwareAiCore) BroadcastGreen else BroadcastAmber,
-                        maxLines = 1
+                ScriptFormatMode.entries.forEach { mode ->
+                    val selected = scriptFormatMode == mode
+                    FilterChip(
+                        selected = selected,
+                        onClick = { assistant.selectScriptFormatMode(mode, context) },
+                        label = {
+                            Text(
+                                text = if (mode == ScriptFormatMode.TV_STUDIO) "📺 Estúdio TV" else "🎙️ Rádio",
+                                fontSize = 11.sp,
+                                fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.Medium,
+                                maxLines = 1
+                            )
+                        },
+                        leadingIcon = if (selected) {
+                            {
+                                Icon(
+                                    Icons.Default.Check,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(13.dp),
+                                    tint = BroadcastGreen
+                                )
+                            }
+                        } else null
                     )
                 }
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // Button to configure Direct Gemini 2.5 / OpenAI / Claude API Key for 100% in-app power
-                IconButton(onClick = { showApiKeySetupDialog = true }) {
+                IconButton(
+                    onClick = { showApiKeySetupDialog = true },
+                    modifier = Modifier.size(34.dp)
+                ) {
                     Icon(
                         Icons.Default.Key,
                         contentDescription = "Configurar Chave Gemini 2.5 / ChatGPT / Claude",
-                        tint = if (cloudApiKey.isNotBlank()) BroadcastGreen else BroadcastAmber
+                        tint = if (cloudApiKey.isNotBlank()) BroadcastGreen else BroadcastAmber,
+                        modifier = Modifier.size(18.dp)
                     )
                 }
 
-                // Paste response copied from official Gemini / ChatGPT / Claude app
                 IconButton(
                     onClick = {
                         val clip = InstalledAiAppsBridge.readClipboardText(context)
                         if (!clip.isNullOrBlank()) {
                             assistant.importExternalScriptResponse(clip, currentScriptTitle)
                         }
-                    }
+                    },
+                    modifier = Modifier.size(34.dp)
                 ) {
                     Icon(
                         Icons.Default.ContentPaste,
-                        contentDescription = "Colar roteiro copiado do App Gemini/ChatGPT",
-                        tint = BroadcastCyan
+                        contentDescription = "Colar roteiro copiado",
+                        tint = BroadcastCyan,
+                        modifier = Modifier.size(18.dp)
                     )
                 }
 
-                IconButton(onClick = { assistant.clearConversation() }) {
+                IconButton(
+                    onClick = { assistant.clearConversation() },
+                    modifier = Modifier.size(34.dp)
+                ) {
                     Icon(
                         Icons.Default.Refresh,
                         contentDescription = "Limpar Conversa",
-                        tint = Color.LightGray
+                        tint = Color.LightGray,
+                        modifier = Modifier.size(18.dp)
                     )
                 }
+
                 if (onClose != null) {
-                    IconButton(onClick = onClose) {
+                    IconButton(
+                        onClick = onClose,
+                        modifier = Modifier.size(34.dp)
+                    ) {
                         Icon(
                             Icons.Default.Close,
                             contentDescription = "Fechar",
-                            tint = Color.White
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp)
                         )
                     }
                 }
             }
         }
 
-        HorizontalDivider(
-            modifier = Modifier.padding(vertical = 8.dp),
-            color = StudioBorder
-        )
-
-        // PROFESSIONAL SCRIPT FORMAT SELECTOR (TV Studio App Default vs Radio Announcer Anticipated Punctuation)
-        Surface(
-            color = StudioSurface,
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 8.dp)
-                .border(1.dp, StudioBorder, RoundedCornerShape(12.dp))
-        ) {
-            Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
-                Text(
-                    text = "FORMATO PROFISSIONAL DO ROTEIRO:",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = BroadcastAmber,
-                    fontSize = 10.sp
-                )
-                Spacer(Modifier.height(4.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    ScriptFormatMode.entries.forEach { mode ->
-                        val selected = scriptFormatMode == mode
-                        FilterChip(
-                            selected = selected,
-                            onClick = { assistant.selectScriptFormatMode(mode, context) },
-                            label = {
-                                Text(
-                                    text = mode.shortLabel,
-                                    fontSize = 11.sp,
-                                    fontWeight = if (selected) FontWeight.ExtraBold else FontWeight.Medium,
-                                    maxLines = 1
-                                )
-                            },
-                            leadingIcon = if (selected) {
-                                {
-                                    Icon(
-                                        Icons.Default.Check,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(14.dp),
-                                        tint = BroadcastGreen
-                                    )
-                                }
-                            } else null,
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                }
-                Text(
-                    text = scriptFormatMode.subtitle,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFF94A3B8),
-                    fontSize = 10.sp
-                )
-            }
-        }
-
-        // CASE 1: No AI App Installed on Phone AND No API Key Configured -> Recommend downloading Google Gemini!
+        // CASE 1: No AI App Installed on Phone AND No API Key Configured -> Compact banner to install Google Gemini
         if (!isAiEnabledOnDevice) {
             Card(
                 colors = CardDefaults.cardColors(containerColor = StudioCard),
-                shape = RoundedCornerShape(14.dp),
+                shape = RoundedCornerShape(12.dp),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(bottom = 10.dp)
-                    .border(1.5.dp, BroadcastAmber, RoundedCornerShape(14.dp))
+                    .padding(vertical = 6.dp)
+                    .border(1.dp, BroadcastAmber, RoundedCornerShape(12.dp))
             ) {
                 Column(
-                    modifier = Modifier.padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    modifier = Modifier.padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text(
                         text = "📲 Instale o App Oficial Google Gemini para Habilitar a IA",
-                        style = MaterialTheme.typography.titleSmall,
+                        style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Black,
                         color = BroadcastAmber
-                    )
-                    Text(
-                        text = "Não detectamos o aplicativo oficial do Google Gemini, ChatGPT ou Claude instalado neste aparelho. Baixe o Google Gemini na Play Store (ou conecte sua chave gratuita do Gemini 2.5) para liberar o botão de geração com inteligência máxima!",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color.White
                     )
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -672,158 +613,83 @@ fun GeminiAssistantPanel(
                             ),
                             modifier = Modifier.weight(1f)
                         ) {
-                            Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Baixar Google Gemini", fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                            Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Baixar Google Gemini", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
                         }
 
                         OutlinedButton(
                             onClick = { showApiKeySetupDialog = true },
                             modifier = Modifier.weight(1f)
                         ) {
-                            Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(15.dp))
                             Spacer(Modifier.width(4.dp))
-                            Text("Usar Chave Gemini 2.5", fontSize = 12.sp)
+                            Text("Chave Gemini 2.5", fontSize = 11.sp)
                         }
                     }
                 }
             }
-        } else if (installedApps.isNotEmpty()) {
-            // CASE 2: Show Detected Native AI Apps installed on the phone (Gemini, ChatGPT, Claude, Copilot)
+        }
+
+        // Show starter suggestion chips ONLY before the first script is generated so they don't crowd the screen
+        if (messages.size <= 1) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(bottom = 6.dp)
+                    .padding(top = 4.dp)
                     .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text(
-                    text = "Apps no celular:",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = BroadcastGreen,
-                    fontWeight = FontWeight.Bold
-                )
-                installedApps.forEach { app ->
-                    val isSelected = selectedExternalApp == app
-                    FilterChip(
-                        selected = isSelected,
-                        onClick = {
-                            assistant.selectExternalApp(app)
-                            if (inputField.text.isNotBlank()) {
-                                val formatted = InstalledAiAppsBridge.buildProfessionalTeleprompterPrompt(
-                                    userRequest = inputField.text,
-                                    currentTitle = currentScriptTitle,
-                                    currentScript = currentScriptContent
-                                )
-                                assistant.markSentToExternalAiApp(formatted)
-                                InstalledAiAppsBridge.sendPromptToInstalledAiApp(
-                                    context = context,
-                                    provider = app,
-                                    userRequest = inputField.text,
-                                    currentTitle = currentScriptTitle,
-                                    currentScript = currentScriptContent
-                                )
-                            }
-                        },
+                val suggestions = if (!currentScriptContent.isNullOrBlank()) {
+                    listOf(
+                        "Deixe este roteiro mais natural e conversado para gravar",
+                        "Adapte para um vídeo curto de 30s (Reels/TikTok)",
+                        "Melhore a abertura com um gancho que prenda a atenção",
+                        "Me dê 3 ideias de como encerrar este vídeo"
+                    )
+                } else {
+                    listOf(
+                        "Me ajude a criar um roteiro natural de 1 minuto para YouTube",
+                        "Crie um roteiro curto de 30s para Reels apresentando meu trabalho",
+                        "Quero gravar um vídeo vendendo um produto, me ajude no roteiro",
+                        "Crie um roteiro dinâmico de notícia / informativo"
+                    )
+                }
+
+                suggestions.forEach { suggestion ->
+                    AssistChip(
+                        onClick = { submitPrompt(suggestion) },
                         label = {
                             Text(
-                                text = "IA Ativa: ${app.displayName}",
+                                text = suggestion,
                                 fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
+                                color = Color.White
                             )
                         },
-                        leadingIcon = {
-                            Icon(
-                                Icons.Default.Check,
-                                contentDescription = null,
-                                modifier = Modifier.size(14.dp),
-                                tint = BroadcastGreen
-                            )
-                        }
+                        colors = AssistChipDefaults.assistChipColors(
+                            containerColor = StudioCard
+                        )
                     )
                 }
             }
         }
 
-        // Quick Natural-Language Suggestion Chips
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            val suggestions = if (!currentScriptContent.isNullOrBlank()) {
-                listOf(
-                    "Deixe este roteiro mais natural e conversado para gravar",
-                    "Adapte para um vídeo curto de 30s (Reels/TikTok)",
-                    "Melhore a abertura com um gancho que prenda a atenção",
-                    "Me dê 3 ideias de como encerrar este vídeo"
-                )
-            } else {
-                listOf(
-                    "Me ajude a criar um roteiro natural de 1 minuto para YouTube",
-                    "Crie um roteiro curto de 30s para Reels apresentando meu trabalho",
-                    "Quero gravar um vídeo vendendo um produto, me ajude no roteiro",
-                    "Crie um roteiro dinâmico de notícia / informativo"
-                )
-            }
+        Spacer(Modifier.height(4.dp))
 
-            suggestions.forEach { suggestion ->
-                AssistChip(
-                    onClick = { submitPrompt(suggestion) },
-                    label = {
-                        Text(
-                            text = suggestion,
-                            fontSize = 11.sp,
-                            color = Color.White
-                        )
-                    },
-                    colors = AssistChipDefaults.assistChipColors(
-                        containerColor = StudioCard
-                    )
-                )
-            }
-        }
-
-        Spacer(Modifier.height(8.dp))
-
-        // Conversation Messages List
+        // Main Full-Area Conversation & Script View
         LazyColumn(
             state = listState,
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth(),
-            contentPadding = PaddingValues(vertical = 6.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            contentPadding = PaddingValues(vertical = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             items(messages, key = { it.id }) { msg ->
                 ChatBubbleItem(
                     message = msg,
                     hasExistingScript = !currentScriptContent.isNullOrBlank(),
-                    installedAiApp = selectedExternalApp,
                     currentFormatMode = scriptFormatMode,
-                    onSelectFormatMode = { newMode ->
-                        assistant.selectScriptFormatMode(newMode, context)
-                    },
-                    onOpenInInstalledApp = { promptToOpen ->
-                        val provider = selectedExternalApp
-                        if (provider != null) {
-                            val formatted = InstalledAiAppsBridge.buildProfessionalTeleprompterPrompt(
-                                userRequest = promptToOpen,
-                                currentTitle = currentScriptTitle,
-                                currentScript = currentScriptContent
-                            )
-                            assistant.markSentToExternalAiApp(formatted)
-                            InstalledAiAppsBridge.sendPromptToInstalledAiApp(
-                                context = context,
-                                provider = provider,
-                                userRequest = promptToOpen,
-                                currentTitle = currentScriptTitle,
-                                currentScript = currentScriptContent
-                            )
-                        }
-                    },
                     onQuickRefine = { refinementRequest ->
                         submitPrompt(refinementRequest)
                     },
@@ -1059,23 +925,23 @@ fun GeminiAssistantPanel(
 private fun ChatBubbleItem(
     message: AiChatMessage,
     hasExistingScript: Boolean,
-    installedAiApp: ExternalAiProvider?,
     currentFormatMode: ScriptFormatMode,
-    onSelectFormatMode: (ScriptFormatMode) -> Unit,
-    onOpenInInstalledApp: (String) -> Unit,
     onQuickRefine: (String) -> Unit,
     onApplyScript: (title: String, scriptContent: String, startImmediately: Boolean) -> Unit
 ) {
     val alignment = if (message.isUser) Alignment.End else Alignment.Start
-    val bubbleColor = if (message.isUser) {
-        BroadcastCyan.copy(alpha = 0.22f)
-    } else {
-        StudioSurface
+    val scriptCandidate = message.extractedScript
+    val hasScript = !message.isUser && !message.isStreaming && !scriptCandidate.isNullOrBlank()
+
+    val bubbleColor = when {
+        message.isUser -> BroadcastCyan.copy(alpha = 0.22f)
+        hasScript -> StudioBlack
+        else -> StudioSurface
     }
-    val borderColor = if (message.isUser) {
-        BroadcastCyan.copy(alpha = 0.6f)
-    } else {
-        StudioBorder
+    val borderColor = when {
+        message.isUser -> BroadcastCyan.copy(alpha = 0.6f)
+        hasScript -> BroadcastCyan.copy(alpha = 0.45f)
+        else -> StudioBorder
     }
 
     Column(
@@ -1084,28 +950,13 @@ private fun ChatBubbleItem(
     ) {
         Card(
             colors = CardDefaults.cardColors(containerColor = bubbleColor),
-            shape = RoundedCornerShape(14.dp),
+            shape = RoundedCornerShape(12.dp),
             modifier = Modifier
-                .fillMaxWidth(if (message.isUser) 0.85f else 0.96f)
-                .border(1.dp, borderColor, RoundedCornerShape(14.dp))
+                .fillMaxWidth(if (message.isUser) 0.88f else 1f)
+                .border(1.dp, borderColor, RoundedCornerShape(12.dp))
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
-                Text(
-                    text = if (message.isUser) "Você" else "✨ Co-Criador IA (Roteirista Profissional)",
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = if (message.isUser) BroadcastCyan else BroadcastAmber
-                )
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = message.text,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.White,
-                    lineHeight = 20.sp
-                )
-
-                val scriptCandidate = message.extractedScript
-                if (!message.isUser && !message.isStreaming && !scriptCandidate.isNullOrBlank()) {
+                if (hasScript && scriptCandidate != null) {
                     val title = message.suggestedTitle ?: "Roteiro Gerado por IA"
                     val wordCount = ScriptParser.countSpokenWords(scriptCandidate)
                     val pauseSecs = ScriptParser.calculateTotalPauseSeconds(scriptCandidate)
@@ -1118,85 +969,45 @@ private fun ChatBubbleItem(
                         ScriptParser.buildStyledScript(scriptCandidate)
                     }
 
-                    Spacer(Modifier.height(10.dp))
-
-                    // Dedicated Professional Teleprompter Script Preview Card (Styled identically to the live Teleprompter!)
-                    Surface(
-                        color = StudioBlack,
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .border(1.dp, BroadcastCyan.copy(alpha = 0.45f), RoundedCornerShape(12.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = if (currentFormatMode == ScriptFormatMode.RADIO_ANNOUNCER) {
-                                        "🎙️ ROTEIRO LOCUÇÃO DE RÁDIO"
-                                    } else {
-                                        "📺 ROTEIRO ESTÚDIO TV (PADRÃO APP)"
-                                    },
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    color = BroadcastCyan
-                                )
-                                Text(
-                                    text = "⏱ ~$durationBadge • $wordCount pal.",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = BroadcastAmber
-                                )
-                            }
-
-                            Spacer(Modifier.height(6.dp))
-
-                            // Instant Format Switcher right inside the script card
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                ScriptFormatMode.entries.forEach { mode ->
-                                    val isCurrent = currentFormatMode == mode
-                                    FilterChip(
-                                        selected = isCurrent,
-                                        onClick = { onSelectFormatMode(mode) },
-                                        label = {
-                                            Text(
-                                                text = mode.shortLabel,
-                                                fontSize = 10.sp,
-                                                fontWeight = if (isCurrent) FontWeight.ExtraBold else FontWeight.Normal
-                                            )
-                                        },
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                }
-                            }
-
-                            HorizontalDivider(
-                                modifier = Modifier.padding(vertical = 6.dp),
-                                color = StudioBorder
-                            )
-                            Text(
-                                text = styledScript,
-                                style = MaterialTheme.typography.bodyMedium,
-                                lineHeight = 23.sp
-                            )
-                        }
+                        Text(
+                            text = if (currentFormatMode == ScriptFormatMode.RADIO_ANNOUNCER) {
+                                "🎙️ ROTEIRO LOCUÇÃO DE RÁDIO"
+                            } else {
+                                "📺 ROTEIRO ESTÚDIO TV"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = BroadcastCyan
+                        )
+                        Text(
+                            text = "⏱ ~$durationBadge • $wordCount pal.",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = BroadcastAmber
+                        )
                     }
 
-                    Spacer(Modifier.height(8.dp))
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 8.dp),
+                        color = StudioBorder
+                    )
+
+                    // Direct full-width styled script without any inner nested box
+                    Text(
+                        text = styledScript,
+                        style = MaterialTheme.typography.bodyLarge,
+                        lineHeight = 25.sp,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(Modifier.height(10.dp))
 
                     // Interactive Co-Creation Refinement Chips
-                    Text(
-                        text = "Refinar com a IA:",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF94A3B8)
-                    )
-                    Spacer(Modifier.height(4.dp))
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1204,7 +1015,7 @@ private fun ChatBubbleItem(
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         val refinements = listOf(
-                            "✨ Mais natural e conversado" to "Deixe esse roteiro ainda mais natural, fluido e conversado mantendo a estrutura profissional.",
+                            "✨ Mais natural" to "Deixe esse roteiro ainda mais natural, fluido e conversado mantendo a estrutura profissional.",
                             "⏱ Encurtar p/ 30s" to "Enxugue e adapte esse roteiro para caber em 30 segundos mantendo as marcações profissionais.",
                             "🔥 Melhorar abertura" to "Crie um gancho inicial mais forte nas primeiras frases desse roteiro para prender a atenção logo nos 3 primeiros segundos.",
                             "📈 Desenvolver mais" to "Expanda e desenvolva um pouco mais os argumentos desse roteiro com exemplos práticos."
@@ -1271,6 +1082,20 @@ private fun ChatBubbleItem(
                             )
                         }
                     }
+                } else {
+                    Text(
+                        text = if (message.isUser) "Você" else "✨ Roteirista IA",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = if (message.isUser) BroadcastCyan else BroadcastAmber
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = message.text,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color.White,
+                        lineHeight = 22.sp
+                    )
                 }
             }
         }

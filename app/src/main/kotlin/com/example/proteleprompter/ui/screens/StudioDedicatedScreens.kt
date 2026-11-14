@@ -120,17 +120,15 @@ fun GeminiAiScreen(
     onApplyScript: (title: String, scriptContent: String, startImmediately: Boolean) -> Unit,
     onBack: () -> Unit
 ) {
-    val windowInfo = rememberAdaptiveWindowInfo()
-
     Scaffold(
         containerColor = StudioBlack,
         topBar = {
             DedicatedScreenTopBar(
-                title = "Estúdio IA Gemini Nano",
+                title = "Estúdio Criador de Roteiros IA",
                 subtitle = if (currentScript != null) {
-                    "Editando com IA: ${currentScript.title}"
+                    "Editando: ${currentScript.title}"
                 } else {
-                    "Criação de Roteiros em Linguagem Natural no Aparelho"
+                    "Estúdio TV & Locução de Rádio"
                 },
                 icon = Icons.Default.AutoAwesome,
                 iconTint = BroadcastAmber,
@@ -138,25 +136,17 @@ fun GeminiAiScreen(
             )
         }
     ) { innerPadding ->
-        Box(
+        GeminiAssistantPanel(
+            assistant = assistant,
+            currentScriptTitle = currentScript?.title,
+            currentScriptContent = currentScript?.content,
+            onApplyScript = onApplyScript,
+            onClose = null,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
                 .navigationBarsPadding()
-                .padding(horizontal = windowInfo.horizontalPadding, vertical = 8.dp)
-        ) {
-            GeminiAssistantPanel(
-                assistant = assistant,
-                currentScriptTitle = currentScript?.title,
-                currentScriptContent = currentScript?.content,
-                onApplyScript = onApplyScript,
-                onClose = null,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clip(RoundedCornerShape(16.dp))
-                    .border(1.dp, StudioBorder, RoundedCornerShape(16.dp))
-            )
-        }
+        )
     }
 }
 
