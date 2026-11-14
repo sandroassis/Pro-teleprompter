@@ -1,7 +1,9 @@
 package com.example.proteleprompter
 
+import android.content.Intent
 import android.os.Bundle
 import android.view.KeyEvent
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -16,7 +18,8 @@ import com.example.proteleprompter.ui.theme.ProTeleprompterTheme
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        DataRepository.getInstance(applicationContext)
+        val repository = DataRepository.getInstance(applicationContext)
+        handleIncomingSharedScript(intent, repository)
 
         enableEdgeToEdge()
         setContent {
@@ -27,6 +30,34 @@ class MainActivity : ComponentActivity() {
                 ) {
                     MainNavigation()
                 }
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleIncomingSharedScript(intent, DataRepository.getInstance(applicationContext))
+    }
+
+    private fun handleIncomingSharedScript(intent: Intent?, repository: DataRepository) {
+        if (intent?.action == Intent.ACTION_SEND && intent.type == "text/plain") {
+            val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim()
+            if (!sharedText.isNullOrBlank()) {
+                val firstLine = sharedText.lines()
+                    .firstOrNull { it.isNotBlank() && !it.startsWith("===") && !it.startsWith("[") }
+                    ?.take(42)
+                    ?: "Roteiro Importado da IA"
+                repository.createNewScript(
+                    title = "IA: $firstLine",
+                    folder = "IA Studio",
+                    initialContent = sharedText
+                )
+                Toast.makeText(
+                    applicationContext,
+                    "✨ Roteiro recebido do App de IA e salvo em 'IA Studio'!",
+                    Toast.LENGTH_LONG
+                ).show()
+                intent.action = Intent.ACTION_MAIN
             }
         }
     }

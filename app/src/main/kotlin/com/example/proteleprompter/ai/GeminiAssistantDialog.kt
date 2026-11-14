@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -41,15 +42,19 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
@@ -57,13 +62,16 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -88,6 +96,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.proteleprompter.ui.theme.BroadcastAmber
 import com.example.proteleprompter.ui.theme.BroadcastCyan
 import com.example.proteleprompter.ui.theme.BroadcastGreen
@@ -102,12 +113,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.util.Locale
 
-/**
- * Low-latency, real-time continuous microphone controller.
- * Reuses a persistent SpeechRecognizer instance (avoiding service re-binding overhead),
- * streams word-by-word partial & segment results immediately, and stays active across pauses
- * until the user explicitly taps the microphone button to finish.
- */
 private class ContinuousAiMicController(
     private val context: Context,
     private val onTextUpdated: (String) -> Unit
@@ -133,7 +138,6 @@ private class ContinuousAiMicController(
             )
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-            // Enable low-latency continuous dictation mode where supported
             putExtra("android.speech.extra.DICTATION_MODE", true)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 putExtra(
@@ -196,20 +200,15 @@ private class ContinuousAiMicController(
             override fun onBeginningOfSpeech() {}
             override fun onRmsChanged(rmsdB: Float) {}
             override fun onBufferReceived(buffer: ByteArray?) {}
-
-            override fun onEndOfSpeech() {
-                // Keep session alive; onResults or onError will seamlessly re-trigger listening
-            }
+            override fun onEndOfSpeech() {}
 
             override fun onError(error: Int) {
                 if (!_isMicActive.value) return
-                // Commit any live partial words before seamless restart
                 if (latestPartialSegment.isNotBlank()) {
                     committedBaseText = combineText(committedBaseText, latestPartialSegment)
                     latestPartialSegment = ""
                     onTextUpdated(committedBaseText)
                 }
-                // If recognizer service got busy/corrupted, recreate once; otherwise reuse immediately
                 if (error == SpeechRecognizer.ERROR_CLIENT || error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
                     recreateRecognizerAndListen(60L)
                 } else {
@@ -228,7 +227,6 @@ private class ContinuousAiMicController(
                     latestPartialSegment = ""
                     onTextUpdated(committedBaseText)
                 }
-                // Zero-delay continuation on the same recognizer instance
                 scheduleImmediateListen(10L)
             }
 
@@ -354,14 +352,21 @@ fun GeminiAssistantPanel(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
+
     val status by assistant.status.collectAsState()
+    val installedApps by assistant.installedApps.collectAsState()
+    val selectedExternalApp by assistant.selectedExternalApp.collectAsState()
+    val cloudApiKey by assistant.cloudApiKey.collectAsState()
+    val cloudVendor by assistant.cloudVendor.collectAsState()
     val downloadProgress by assistant.downloadProgressText.collectAsState()
     val messages by assistant.messages.collectAsState()
     val listState = rememberLazyListState()
 
     var inputField by remember { mutableStateOf(TextFieldValue("")) }
     var isGenerating by remember { mutableStateOf(false) }
+    var showApiKeySetupDialog by remember { mutableStateOf(false) }
     val inputScrollState = rememberScrollState()
 
     val micController = remember(context) {
@@ -389,14 +394,22 @@ fun GeminiAssistantPanel(
         }
     }
 
-    DisposableEffect(Unit) {
+    // Re-check installed apps (Gemini, ChatGPT, Claude) whenever user returns to the app
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                assistant.refreshInstalledAppsAndConfig(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
             micController.stopContinuousListening()
         }
     }
 
     LaunchedEffect(Unit) {
-        assistant.initializeModel()
+        assistant.initializeModel(context)
     }
 
     LaunchedEffect(messages.size) {
@@ -428,6 +441,20 @@ fun GeminiAssistantPanel(
         }
         val clean = promptText.trim()
         if (clean.isEmpty() || isGenerating) return
+
+        // If user has an official AI app installed (e.g. Google Gemini / ChatGPT / Claude) AND hasn't configured an in-app API key,
+        // offer or send directly to the installed native app!
+        val activeExternal = selectedExternalApp
+        if (cloudApiKey.isBlank() && status != GeminiNanoStatus.AVAILABLE && activeExternal != null) {
+            InstalledAiAppsBridge.sendPromptToInstalledAiApp(
+                context = context,
+                provider = activeExternal,
+                userRequest = clean,
+                currentTitle = currentScriptTitle,
+                currentScript = currentScriptContent
+            )
+        }
+
         inputField = TextFieldValue("")
         isGenerating = true
         scope.launch {
@@ -440,18 +467,25 @@ fun GeminiAssistantPanel(
         }
     }
 
+    val isAiEnabledOnDevice = installedApps.isNotEmpty() ||
+        cloudApiKey.isNotBlank() ||
+        status == GeminiNanoStatus.AVAILABLE
+
     Column(
         modifier = modifier
             .background(StudioBlack)
             .padding(14.dp)
     ) {
-        // Header with On-Device Gemini Nano status badge
+        // Header with AI Engine Status + API Key Setup Button
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
@@ -467,37 +501,49 @@ fun GeminiAssistantPanel(
                     )
                 }
                 Spacer(Modifier.width(10.dp))
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Assistente IA Gemini (No Aparelho)",
+                        text = "Central de IA (Gemini / ChatGPT / Claude)",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.ExtraBold,
-                        color = Color.White
+                        color = Color.White,
+                        maxLines = 1
                     )
                     Text(
                         text = downloadProgress ?: status.badgeText,
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (status.isHardwareAiCore) BroadcastGreen else BroadcastAmber
+                        color = if (status.isHardwareAiCore) BroadcastGreen else BroadcastAmber,
+                        maxLines = 1
                     )
                 }
             }
 
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (status == GeminiNanoStatus.DOWNLOADABLE) {
-                    AssistChip(
-                        onClick = {
-                            scope.launch { assistant.downloadNanoModelIfNeeded() }
-                        },
-                        label = { Text("Baixar Nano", fontSize = 11.sp) },
-                        leadingIcon = {
-                            Icon(
-                                Icons.Default.Download,
-                                contentDescription = null,
-                                modifier = Modifier.size(14.dp)
-                            )
-                        }
+                // Button to configure Direct Gemini 2.5 / OpenAI / Claude API Key for 100% in-app power
+                IconButton(onClick = { showApiKeySetupDialog = true }) {
+                    Icon(
+                        Icons.Default.Key,
+                        contentDescription = "Configurar Chave Gemini 2.5 / ChatGPT / Claude",
+                        tint = if (cloudApiKey.isNotBlank()) BroadcastGreen else BroadcastAmber
                     )
                 }
+
+                // Paste response copied from official Gemini / ChatGPT / Claude app
+                IconButton(
+                    onClick = {
+                        val clip = InstalledAiAppsBridge.readClipboardText(context)
+                        if (!clip.isNullOrBlank()) {
+                            assistant.importExternalScriptResponse(clip, currentScriptTitle)
+                        }
+                    }
+                ) {
+                    Icon(
+                        Icons.Default.ContentPaste,
+                        contentDescription = "Colar roteiro copiado do App Gemini/ChatGPT",
+                        tint = BroadcastCyan
+                    )
+                }
+
                 IconButton(onClick = { assistant.clearConversation() }) {
                     Icon(
                         Icons.Default.Refresh,
@@ -521,6 +567,116 @@ fun GeminiAssistantPanel(
             modifier = Modifier.padding(vertical = 8.dp),
             color = StudioBorder
         )
+
+        // CASE 1: No AI App Installed on Phone AND No API Key Configured -> Recommend downloading Google Gemini!
+        if (!isAiEnabledOnDevice) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = StudioCard),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 10.dp)
+                    .border(1.5.dp, BroadcastAmber, RoundedCornerShape(14.dp))
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "📲 Instale o App Oficial Google Gemini para Habilitar a IA",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Black,
+                        color = BroadcastAmber
+                    )
+                    Text(
+                        text = "Não detectamos o aplicativo oficial do Google Gemini, ChatGPT ou Claude instalado neste aparelho. Baixe o Google Gemini na Play Store (ou conecte sua chave gratuita do Gemini 2.5) para liberar o botão de geração com inteligência máxima!",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.White
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                InstalledAiAppsBridge.openPlayStoreToInstall(
+                                    context,
+                                    ExternalAiProvider.GOOGLE_GEMINI
+                                )
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = BroadcastCyan,
+                                contentColor = Color(0xFF041E2B)
+                            ),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Baixar Google Gemini", fontSize = 12.sp, fontWeight = FontWeight.ExtraBold)
+                        }
+
+                        OutlinedButton(
+                            onClick = { showApiKeySetupDialog = true },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Usar Chave Gemini 2.5", fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+        } else if (installedApps.isNotEmpty()) {
+            // CASE 2: Show Detected Native AI Apps installed on the phone (Gemini, ChatGPT, Claude, Copilot)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 6.dp)
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Apps no celular:",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = BroadcastGreen,
+                    fontWeight = FontWeight.Bold
+                )
+                installedApps.forEach { app ->
+                    val isSelected = selectedExternalApp == app
+                    FilterChip(
+                        selected = isSelected,
+                        onClick = {
+                            assistant.selectExternalApp(app)
+                            if (inputField.text.isNotBlank()) {
+                                InstalledAiAppsBridge.sendPromptToInstalledAiApp(
+                                    context = context,
+                                    provider = app,
+                                    userRequest = inputField.text,
+                                    currentTitle = currentScriptTitle,
+                                    currentScript = currentScriptContent
+                                )
+                            }
+                        },
+                        label = {
+                            Text(
+                                text = "Abrir no ${app.displayName}",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                Icons.AutoMirrored.Filled.OpenInNew,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp),
+                                tint = BroadcastCyan
+                            )
+                        }
+                    )
+                }
+            }
+        }
 
         // Quick Natural-Language Suggestion Chips
         Row(
@@ -577,6 +733,19 @@ fun GeminiAssistantPanel(
                 ChatBubbleItem(
                     message = msg,
                     hasExistingScript = !currentScriptContent.isNullOrBlank(),
+                    installedAiApp = selectedExternalApp,
+                    onOpenInInstalledApp = { promptToOpen ->
+                        val provider = selectedExternalApp
+                        if (provider != null) {
+                            InstalledAiAppsBridge.sendPromptToInstalledAiApp(
+                                context = context,
+                                provider = provider,
+                                userRequest = promptToOpen,
+                                currentTitle = currentScriptTitle,
+                                currentScript = currentScriptContent
+                            )
+                        }
+                    },
                     onApplyScript = { title, content, startNow ->
                         onApplyScript(title, content, startNow)
                     }
@@ -684,7 +853,7 @@ fun GeminiAssistantPanel(
                                 text = if (isMicActive) {
                                     "Ouvindo em tempo real... fale normalmente e clique no microfone para parar"
                                 } else {
-                                    "Converse com a IA (ex: 'Crie um vídeo sobre finanças')..."
+                                    "Peça seu roteiro para o Gemini / ChatGPT / Claude..."
                                 },
                                 color = Color.Gray,
                                 fontSize = 13.sp,
@@ -697,10 +866,19 @@ fun GeminiAssistantPanel(
             }
 
             Button(
-                onClick = { submitPrompt(inputField.text) },
-                enabled = inputField.text.isNotBlank() && !isGenerating,
+                onClick = {
+                    if (!isAiEnabledOnDevice) {
+                        InstalledAiAppsBridge.openPlayStoreToInstall(
+                            context,
+                            ExternalAiProvider.GOOGLE_GEMINI
+                        )
+                    } else {
+                        submitPrompt(inputField.text)
+                    }
+                },
+                enabled = (inputField.text.isNotBlank() || !isAiEnabledOnDevice) && !isGenerating,
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = BroadcastCyan,
+                    containerColor = if (isAiEnabledOnDevice) BroadcastCyan else BroadcastAmber,
                     contentColor = Color(0xFF041E2B)
                 ),
                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
@@ -714,13 +892,85 @@ fun GeminiAssistantPanel(
                     )
                 } else {
                     Icon(
-                        Icons.AutoMirrored.Filled.Send,
-                        contentDescription = "Enviar",
+                        if (isAiEnabledOnDevice) Icons.AutoMirrored.Filled.Send else Icons.Default.Download,
+                        contentDescription = "Enviar para IA",
                         modifier = Modifier.size(18.dp)
                     )
                 }
             }
         }
+    }
+
+    // DIALOG: Configure Direct Cloud API Key (Google Gemini 2.5 Flash / OpenAI GPT-4o / Anthropic Claude)
+    if (showApiKeySetupDialog) {
+        var keyInput by remember(cloudApiKey) { mutableStateOf(cloudApiKey) }
+        var selectedVendor by remember(cloudVendor) { mutableStateOf(cloudVendor) }
+
+        AlertDialog(
+            onDismissRequest = { showApiKeySetupDialog = false },
+            title = { Text("Potência Total: Gemini 2.5 / ChatGPT / Claude") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Para gerar roteiros com 100% da inteligência do Gemini 2.5 Pro/Flash, ChatGPT ou Claude direto dentro do chat sem sair do Teleprompter, escolha o provedor e cole sua chave de API:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.LightGray
+                    )
+
+                    CloudAiVendor.entries.forEach { vendor ->
+                        FilterChip(
+                            selected = selectedVendor == vendor,
+                            onClick = { selectedVendor = vendor },
+                            label = { Text(vendor.label) },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
+                    OutlinedTextField(
+                        value = keyInput,
+                        onValueChange = { keyInput = it },
+                        label = { Text("Chave da API (${selectedVendor.label})") },
+                        placeholder = { Text("Ex: AIzaSy... ou sk-...") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    OutlinedButton(
+                        onClick = {
+                            try {
+                                val url = when (selectedVendor) {
+                                    CloudAiVendor.GOOGLE_GEMINI -> "https://aistudio.google.com/app/apikey"
+                                    CloudAiVendor.OPENAI_CHATGPT -> "https://platform.openai.com/api-keys"
+                                    CloudAiVendor.ANTHROPIC_CLAUDE -> "https://console.anthropic.com/settings/keys"
+                                }
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                            } catch (_: Exception) {
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Gerar Chave Gratuita no Google AI Studio")
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        assistant.saveCloudApiKey(context, keyInput, selectedVendor)
+                        showApiKeySetupDialog = false
+                    }
+                ) {
+                    Text("Salvar e Ativar")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showApiKeySetupDialog = false }) {
+                    Text("Cancelar")
+                }
+            }
+        )
     }
 }
 
@@ -728,6 +978,8 @@ fun GeminiAssistantPanel(
 private fun ChatBubbleItem(
     message: AiChatMessage,
     hasExistingScript: Boolean,
+    installedAiApp: ExternalAiProvider?,
+    onOpenInInstalledApp: (String) -> Unit,
     onApplyScript: (title: String, scriptContent: String, startImmediately: Boolean) -> Unit
 ) {
     val alignment = if (message.isUser) Alignment.End else Alignment.Start
@@ -755,7 +1007,7 @@ private fun ChatBubbleItem(
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
                 Text(
-                    text = if (message.isUser) "Você" else "✨ Gemini Nano (Roteirista IA)",
+                    text = if (message.isUser) "Você" else "✨ Assistente IA (Roteirista)",
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Bold,
                     color = if (message.isUser) BroadcastCyan else BroadcastAmber
@@ -767,6 +1019,29 @@ private fun ChatBubbleItem(
                     color = Color.White,
                     lineHeight = 20.sp
                 )
+
+                // If this is a user message and an official AI app is installed, offer 1-tap launch into that app
+                if (message.isUser && installedAiApp != null) {
+                    Spacer(Modifier.height(6.dp))
+                    AssistChip(
+                        onClick = { onOpenInInstalledApp(message.text) },
+                        label = {
+                            Text(
+                                text = "Enviar para ${installedAiApp.displayName}",
+                                fontSize = 11.sp,
+                                color = BroadcastCyan
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                Icons.AutoMirrored.Filled.OpenInNew,
+                                contentDescription = null,
+                                tint = BroadcastCyan,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    )
+                }
 
                 val scriptCandidate = message.extractedScript
                 if (!message.isUser && !message.isStreaming && !scriptCandidate.isNullOrBlank()) {

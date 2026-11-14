@@ -1,22 +1,43 @@
 package com.example.proteleprompter.ai
 
+import android.content.Context
 import com.google.mlkit.genai.common.DownloadStatus
 import com.google.mlkit.genai.common.FeatureStatus
 import com.google.mlkit.genai.prompt.Generation
 import com.google.mlkit.genai.prompt.GenerativeModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import java.io.OutputStreamWriter
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.Locale
 import java.util.UUID
 
 enum class GeminiNanoStatus(val badgeText: String, val isHardwareAiCore: Boolean) {
-    CHECKING("Verificando Gemini Nano no aparelho...", false),
+    CHECKING("Verificando motores de IA no aparelho...", false),
+    CLOUD_GEMINI_PRO("Gemini 2.5 Flash/Pro Conectado (Potência Máxima)", true),
     AVAILABLE("Gemini Nano (AICore On-Device Ativo)", true),
+    EXTERNAL_APP_LINKED("Integrado ao App Oficial Instalado no Celular", true),
     DOWNLOADABLE("Gemini Nano disponível para download local", true),
     DOWNLOADING("Baixando modelo Gemini Nano no dispositivo...", true),
-    LOCAL_SMART_ENGINE("Motor Local Inteligente Ativo (Offline)", false)
+    NO_AI_APP_INSTALLED("Instale o App Google Gemini ou ative a Chave Gemini", false)
+}
+
+enum class CloudAiVendor(val label: String, val modelName: String) {
+    GOOGLE_GEMINI("Google Gemini 2.5 Flash", "gemini-2.5-flash"),
+    OPENAI_CHATGPT("OpenAI GPT-4o Mini", "gpt-4o-mini"),
+    ANTHROPIC_CLAUDE("Anthropic Claude 3.5", "claude-3-5-haiku-latest")
 }
 
 data class AiChatMessage(
@@ -31,9 +52,22 @@ data class AiChatMessage(
 class OnDeviceGeminiAssistant {
 
     private var generativeModel: GenerativeModel? = null
+    private val json = Json { ignoreUnknownKeys = true }
 
     private val _status = MutableStateFlow(GeminiNanoStatus.CHECKING)
     val status: StateFlow<GeminiNanoStatus> = _status.asStateFlow()
+
+    private val _installedApps = MutableStateFlow<List<ExternalAiProvider>>(emptyList())
+    val installedApps: StateFlow<List<ExternalAiProvider>> = _installedApps.asStateFlow()
+
+    private val _selectedExternalApp = MutableStateFlow<ExternalAiProvider?>(null)
+    val selectedExternalApp: StateFlow<ExternalAiProvider?> = _selectedExternalApp.asStateFlow()
+
+    private val _cloudApiKey = MutableStateFlow("")
+    val cloudApiKey: StateFlow<String> = _cloudApiKey.asStateFlow()
+
+    private val _cloudVendor = MutableStateFlow(CloudAiVendor.GOOGLE_GEMINI)
+    val cloudVendor: StateFlow<CloudAiVendor> = _cloudVendor.asStateFlow()
 
     private val _downloadProgressText = MutableStateFlow<String?>(null)
     val downloadProgressText: StateFlow<String?> = _downloadProgressText.asStateFlow()
@@ -42,40 +76,76 @@ class OnDeviceGeminiAssistant {
         listOf(
             AiChatMessage(
                 isUser = false,
-                text = "Olá! Sou seu assistente de roteiros integrado ao dispositivo com **Gemini Nano**.\n\n" +
-                    "Converse comigo em linguagem natural! Por exemplo:\n" +
-                    "• *\"Crie um roteiro de 1 minuto para YouTube sobre produtividade\"*\n" +
-                    "• *\"Adapte meu roteiro atual para um Reels de 30 segundos mais dinâmico\"*\n" +
-                    "• *\"Adicione pausas estratégicas e destaques de entonação\"*"
+                text = "Olá! Sou sua central de **IA para Roteiros de Teleprompter**.\n\n" +
+                    "Para ter **100% da inteligência do Gemini, ChatGPT ou Claude**, você pode:\n" +
+                    "1️⃣ **Usar o App Oficial Instalado no seu Celular** (Google Gemini, ChatGPT ou Claude) com 1 toque;\n" +
+                    "2️⃣ **Ou ativar sua Chave Gratuita do Gemini 2.5** no botão de chave acima para gerar roteiros completos sem sair desta tela!"
             )
         )
     )
     val messages: StateFlow<List<AiChatMessage>> = _messages.asStateFlow()
 
-    suspend fun initializeModel() {
+    fun refreshInstalledAppsAndConfig(context: Context) {
+        val prefs = context.getSharedPreferences("pro_teleprompter_ai_prefs", Context.MODE_PRIVATE)
+        val savedKey = prefs.getString("cloud_api_key", "").orEmpty().trim()
+        val savedVendorName = prefs.getString("cloud_vendor", CloudAiVendor.GOOGLE_GEMINI.name)
+        _cloudApiKey.value = savedKey
+        _cloudVendor.value = CloudAiVendor.entries.find { it.name == savedVendorName }
+            ?: CloudAiVendor.GOOGLE_GEMINI
+
+        val detected = InstalledAiAppsBridge.detectInstalledAiApps(context)
+        _installedApps.value = detected
+        if (_selectedExternalApp.value == null || _selectedExternalApp.value !in detected) {
+            _selectedExternalApp.value = detected.firstOrNull()
+        }
+
+        updateEffectiveStatus()
+    }
+
+    fun saveCloudApiKey(context: Context, apiKey: String, vendor: CloudAiVendor) {
+        val cleanKey = apiKey.trim()
+        _cloudApiKey.value = cleanKey
+        _cloudVendor.value = vendor
+        context.getSharedPreferences("pro_teleprompter_ai_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .putString("cloud_api_key", cleanKey)
+            .putString("cloud_vendor", vendor.name)
+            .apply()
+        updateEffectiveStatus()
+    }
+
+    fun selectExternalApp(provider: ExternalAiProvider) {
+        _selectedExternalApp.value = provider
+    }
+
+    suspend fun initializeModel(context: Context? = null) {
+        if (context != null) {
+            refreshInstalledAppsAndConfig(context)
+        }
         try {
             val client = Generation.getClient()
             generativeModel = client
-            when (client.checkStatus()) {
-                FeatureStatus.AVAILABLE -> {
-                    _status.value = GeminiNanoStatus.AVAILABLE
-                    try {
-                        client.warmup()
-                    } catch (_: Exception) {
-                    }
-                }
-                FeatureStatus.DOWNLOADABLE -> {
-                    _status.value = GeminiNanoStatus.DOWNLOADABLE
-                }
-                FeatureStatus.DOWNLOADING -> {
-                    _status.value = GeminiNanoStatus.DOWNLOADING
-                }
-                else -> {
-                    _status.value = GeminiNanoStatus.LOCAL_SMART_ENGINE
+            val nanoStatus = client.checkStatus()
+            if (nanoStatus == FeatureStatus.AVAILABLE) {
+                try {
+                    client.warmup()
+                } catch (_: Exception) {
                 }
             }
+            updateEffectiveStatus(nanoFeatureStatus = nanoStatus)
         } catch (_: Throwable) {
-            _status.value = GeminiNanoStatus.LOCAL_SMART_ENGINE
+            updateEffectiveStatus(nanoFeatureStatus = FeatureStatus.UNAVAILABLE)
+        }
+    }
+
+    private fun updateEffectiveStatus(nanoFeatureStatus: Int = FeatureStatus.UNAVAILABLE) {
+        _status.value = when {
+            _cloudApiKey.value.isNotBlank() -> GeminiNanoStatus.CLOUD_GEMINI_PRO
+            nanoFeatureStatus == FeatureStatus.AVAILABLE -> GeminiNanoStatus.AVAILABLE
+            _installedApps.value.isNotEmpty() -> GeminiNanoStatus.EXTERNAL_APP_LINKED
+            nanoFeatureStatus == FeatureStatus.DOWNLOADABLE -> GeminiNanoStatus.DOWNLOADABLE
+            nanoFeatureStatus == FeatureStatus.DOWNLOADING -> GeminiNanoStatus.DOWNLOADING
+            else -> GeminiNanoStatus.NO_AI_APP_INSTALLED
         }
     }
 
@@ -102,14 +172,28 @@ class OnDeviceGeminiAssistant {
                     }
                     is DownloadStatus.DownloadFailed -> {
                         _downloadProgressText.value = null
-                        _status.value = GeminiNanoStatus.LOCAL_SMART_ENGINE
+                        updateEffectiveStatus()
                     }
                 }
             }
         } catch (_: Throwable) {
             _downloadProgressText.value = null
-            _status.value = GeminiNanoStatus.LOCAL_SMART_ENGINE
+            updateEffectiveStatus()
         }
+    }
+
+    fun importExternalScriptResponse(rawText: String, customPromptTitle: String? = null) {
+        val cleaned = rawText.trim()
+        if (cleaned.isEmpty()) return
+        val title = customPromptTitle?.takeIf { it.isNotBlank() } ?: inferTopicTitle(cleaned.lines().firstOrNull().orEmpty())
+        val importedMsg = AiChatMessage(
+            isUser = false,
+            text = "📥 **Roteiro recebido do App de IA:**\n\n$cleaned",
+            extractedScript = cleaned,
+            suggestedTitle = title,
+            isStreaming = false
+        )
+        _messages.value = _messages.value + importedMsg
     }
 
     suspend fun sendUserMessage(
@@ -125,7 +209,7 @@ class OnDeviceGeminiAssistant {
         val placeholderMsg = AiChatMessage(
             id = assistantMsgId,
             isUser = false,
-            text = "Gerando roteiro no dispositivo...",
+            text = "Gerando roteiro com IA...",
             isStreaming = true
         )
 
@@ -133,11 +217,44 @@ class OnDeviceGeminiAssistant {
 
         val fullPrompt = buildBroadcastPrompt(
             userMessage = trimmed,
-            history = _messages.value.dropLast(2).takeLast(4),
+            history = _messages.value.dropLast(2).takeLast(6),
             currentTitle = currentScriptTitle,
             currentScript = currentScriptContent
         )
 
+        // 1. PRIORITY 1: Full-Power Cloud LLM (Gemini 2.5 Flash / OpenAI GPT-4o / Claude) when API key is configured
+        val apiKey = _cloudApiKey.value
+        if (apiKey.isNotBlank()) {
+            val cloudResult = callCloudAiModel(
+                vendor = _cloudVendor.value,
+                apiKey = apiKey,
+                prompt = fullPrompt
+            )
+            if (cloudResult.isSuccess) {
+                val responseText = cloudResult.getOrDefault("").trim()
+                if (responseText.isNotBlank()) {
+                    val parsed = extractScriptBlock(responseText, trimmed)
+                    updateAssistantMessage(
+                        id = assistantMsgId,
+                        text = responseText,
+                        extractedScript = parsed.first,
+                        suggestedTitle = parsed.second,
+                        isStreaming = false
+                    )
+                    return
+                }
+            } else {
+                val errMsg = cloudResult.exceptionOrNull()?.localizedMessage ?: "Erro na chave da API"
+                updateAssistantMessage(
+                    id = assistantMsgId,
+                    text = "⚠️ Não foi possível conectar à API (${errMsg}). Verifique sua chave no ícone de engrenagem/chave acima ou clique no botão do App **Google Gemini / ChatGPT** instalado!",
+                    isStreaming = false
+                )
+                return
+            }
+        }
+
+        // 2. PRIORITY 2: Hardware On-Device Gemini Nano (AICore) if available on device
         val client = generativeModel
         if (_status.value == GeminiNanoStatus.AVAILABLE && client != null) {
             try {
@@ -164,31 +281,200 @@ class OnDeviceGeminiAssistant {
                     return
                 }
             } catch (_: Throwable) {
-                // Fall back to on-device smart generator if AICore quota or hardware error occurs
             }
         }
 
-        // Local On-Device Conversational Script Generator fallback
-        delay(350)
+        // 3. PRIORITY 3: Local fallback preview + Prompt ready for Installed Official App (Gemini / ChatGPT / Claude)
+        delay(250)
         val generated = generateSmartOnDeviceResponse(
             userRequest = trimmed,
             currentTitle = currentScriptTitle,
             currentScript = currentScriptContent
         )
+        val installedNames = _installedApps.value.joinToString(", ") { it.displayName }
+        val tipHeader = if (installedNames.isNotEmpty()) {
+            "💡 *Para usar a potência máxima do seu **$installedNames**, toque no botão **\"Abrir no $installedNames\"** abaixo (o seu pedido já foi formatado e copiado) ou configure sua chave gratuita do Gemini 2.5 no topo!*\n\n"
+        } else {
+            "💡 *Para ter respostas com a inteligência completa do Gemini 2.5 Pro/Flash, instale o app oficial **Google Gemini** na Play Store ou insira sua chave gratuita do Google AI Studio no botão de Chave no topo!*\n\n"
+        }
+
         updateAssistantMessage(
             id = assistantMsgId,
-            text = generated.explanation + "\n\n" + generated.scriptContent,
+            text = tipHeader + generated.explanation + "\n\n" + generated.scriptContent,
             extractedScript = generated.scriptContent,
             suggestedTitle = generated.title,
             isStreaming = false
         )
     }
 
+    private suspend fun callCloudAiModel(
+        vendor: CloudAiVendor,
+        apiKey: String,
+        prompt: String
+    ): Result<String> = withContext(Dispatchers.IO) {
+        try {
+            when (vendor) {
+                CloudAiVendor.GOOGLE_GEMINI -> callGoogleGeminiRestApi(apiKey, vendor.modelName, prompt)
+                CloudAiVendor.OPENAI_CHATGPT -> callOpenAiRestApi(apiKey, vendor.modelName, prompt)
+                CloudAiVendor.ANTHROPIC_CLAUDE -> callClaudeRestApi(apiKey, vendor.modelName, prompt)
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    private fun callGoogleGeminiRestApi(apiKey: String, model: String, prompt: String): Result<String> {
+        val endpoint = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$apiKey"
+        val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 15000
+            readTimeout = 30000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+        }
+
+        val payload = buildJsonObject {
+            put("contents", buildJsonArray {
+                add(buildJsonObject {
+                    put("parts", buildJsonArray {
+                        add(buildJsonObject {
+                            put("text", prompt)
+                        })
+                    })
+                })
+            })
+        }.toString()
+
+        OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(payload) }
+
+        val code = conn.responseCode
+        val body = if (code in 200..299) {
+            conn.inputStream.bufferedReader().use { it.readText() }
+        } else {
+            val err = conn.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            return Result.failure(IllegalStateException("HTTP $code: ${err.take(160)}"))
+        }
+
+        val root = json.parseToJsonElement(body).jsonObject
+        val text = root["candidates"]
+            ?.jsonArray
+            ?.firstOrNull()
+            ?.jsonObject
+            ?.get("content")
+            ?.jsonObject
+            ?.get("parts")
+            ?.jsonArray
+            ?.firstOrNull()
+            ?.jsonObject
+            ?.get("text")
+            ?.jsonPrimitive
+            ?.content
+            .orEmpty()
+
+        return if (text.isNotBlank()) {
+            Result.success(text)
+        } else {
+            Result.failure(IllegalStateException("Resposta vazia do modelo Gemini"))
+        }
+    }
+
+    private fun callOpenAiRestApi(apiKey: String, model: String, prompt: String): Result<String> {
+        val endpoint = "https://api.openai.com/v1/chat/completions"
+        val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 15000
+            readTimeout = 30000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+            setRequestProperty("Authorization", "Bearer $apiKey")
+        }
+
+        val payload = buildJsonObject {
+            put("model", model)
+            put("messages", buildJsonArray {
+                add(buildJsonObject {
+                    put("role", "user")
+                    put("content", prompt)
+                })
+            })
+        }.toString()
+
+        OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(payload) }
+
+        val code = conn.responseCode
+        val body = if (code in 200..299) {
+            conn.inputStream.bufferedReader().use { it.readText() }
+        } else {
+            val err = conn.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            return Result.failure(IllegalStateException("HTTP $code: ${err.take(160)}"))
+        }
+
+        val root = json.parseToJsonElement(body).jsonObject
+        val text = root["choices"]
+            ?.jsonArray
+            ?.firstOrNull()
+            ?.jsonObject
+            ?.get("message")
+            ?.jsonObject
+            ?.get("content")
+            ?.jsonPrimitive
+            ?.content
+            .orEmpty()
+
+        return if (text.isNotBlank()) Result.success(text) else Result.failure(IllegalStateException("Sem resposta"))
+    }
+
+    private fun callClaudeRestApi(apiKey: String, model: String, prompt: String): Result<String> {
+        val endpoint = "https://api.anthropic.com/v1/messages"
+        val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 15000
+            readTimeout = 30000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+            setRequestProperty("x-api-key", apiKey)
+            setRequestProperty("anthropic-version", "2023-06-01")
+        }
+
+        val payload = buildJsonObject {
+            put("model", model)
+            put("max_tokens", 2048)
+            put("messages", buildJsonArray {
+                add(buildJsonObject {
+                    put("role", "user")
+                    put("content", prompt)
+                })
+            })
+        }.toString()
+
+        OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(payload) }
+
+        val code = conn.responseCode
+        val body = if (code in 200..299) {
+            conn.inputStream.bufferedReader().use { it.readText() }
+        } else {
+            val err = conn.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            return Result.failure(IllegalStateException("HTTP $code: ${err.take(160)}"))
+        }
+
+        val root = json.parseToJsonElement(body).jsonObject
+        val text = root["content"]
+            ?.jsonArray
+            ?.firstOrNull()
+            ?.jsonObject
+            ?.get("text")
+            ?.jsonPrimitive
+            ?.content
+            .orEmpty()
+
+        return if (text.isNotBlank()) Result.success(text) else Result.failure(IllegalStateException("Sem resposta"))
+    }
+
     fun clearConversation() {
         _messages.value = listOf(
             AiChatMessage(
                 isUser = false,
-                text = "Conversa reiniciada! Me diga sobre qual tema, duração ou estilo você quer criar ou aprimorar seu roteiro."
+                text = "Conversa reiniciada! Digite ou fale no microfone o que você quer no seu roteiro."
             )
         )
     }
@@ -221,7 +507,7 @@ class OnDeviceGeminiAssistant {
         currentScript: String?
     ): String {
         val historyContext = history.joinToString("\n") {
-            if (it.isUser) "Usuário: ${it.text}" else "Assistente: ${it.text.take(300)}"
+            if (it.isUser) "Usuário: ${it.text}" else "Assistente: ${it.text.take(350)}"
         }
         val scriptContext = if (!currentScript.isNullOrBlank()) {
             "\nRoteiro atual aberto (${currentTitle ?: "Sem título"}):\n$currentScript\n"
@@ -230,19 +516,19 @@ class OnDeviceGeminiAssistant {
         }
 
         return """
-            Você é o assistente de IA Gemini Nano integrado ao app Pro Teleprompter no Android.
-            Responda sempre em Português do Brasil de forma natural, prestativa e direta.
-            Ao criar ou revisar um roteiro para teleprompter, estruture o texto usando as marcações de estúdio:
-            - === NOME DO BLOCO === para dividir seções
-            - [DICA]orientação de expressão ou câmera[/DICA]
-            - [DESTAQUE]palavras com ênfase positiva[/DESTAQUE]
-            - [ALERTA]frases de impacto ou atenção[/ALERTA]
+            Você é um Diretor e Roteirista Profissional especialista em Teleprompter, TV, YouTube e Marketing Digital.
+            Responda em Português do Brasil com altíssima qualidade, profundidade, criatividade e naturalidade para leitura em voz alta.
+            Ao criar ou adaptar um roteiro para Teleprompter, estruture o texto usando as marcações de estúdio:
+            - === NOME DO BLOCO === para dividir as seções do roteiro
+            - [DICA]orientação de expressão, entonação ou câmera[/DICA]
+            - [DESTAQUE]palavras ou frases com ênfase positiva[/DESTAQUE]
+            - [ALERTA]frases de impacto ou atenção máxima[/ALERTA]
             - [PAUSA 2s] ou [PAUSA 3s] entre ideias importantes.
             $scriptContext
-            Histórico recente:
+            Histórico recente da conversa:
             $historyContext
 
-            Pedido do usuário: $userMessage
+            Pedido atual do usuário: $userMessage
         """.trimIndent()
     }
 
@@ -270,7 +556,6 @@ class OnDeviceGeminiAssistant {
         val lower = userRequest.lowercase(Locale.forLanguageTag("pt-BR"))
         val topic = inferTopicTitle(userRequest)
 
-        // Case 1: User wants to improve/add pauses/highlights to current script
         if (!currentScript.isNullOrBlank() && (
                 lower.contains("pausa") ||
                     lower.contains("melhor") ||
@@ -295,22 +580,7 @@ class OnDeviceGeminiAssistant {
                         appendLine()
                         appendLine("=== PONTO PRINCIPAL ===")
                     }
-                    val withEmphasis = if (!line.contains("[DESTAQUE]") && line.length > 35) {
-                        val words = line.split(" ")
-                        if (words.size > 6) {
-                            val mid = words.size / 2
-                            words.subList(0, mid).joinToString(" ") +
-                                " [DESTAQUE]" +
-                                words.subList(mid, (mid + 3).coerceAtMost(words.size)).joinToString(" ") +
-                                "[/DESTAQUE] " +
-                                words.subList((mid + 3).coerceAtMost(words.size), words.size).joinToString(" ")
-                        } else {
-                            line
-                        }
-                    } else {
-                        line
-                    }
-                    appendLine(withEmphasis.trim())
+                    appendLine(line.trim())
                     appendLine("[PAUSA 2s]")
                     appendLine()
                 }
@@ -320,126 +590,32 @@ class OnDeviceGeminiAssistant {
 
             return GeneratedScriptResult(
                 title = currentTitle ?: "Roteiro Otimizado com IA",
-                explanation = "Otimizei seu roteiro adicionando **blocos de leitura**, **pausas estratégicas (`[PAUSA 2s]`)** e **destaques de entonação** para leitura fluida no Teleprompter:",
+                explanation = "Roteiro estruturado localmente com **blocos de leitura** e **pausas (`[PAUSA 2s]`)**:",
                 scriptContent = enhanced
             )
         }
 
-        // Case 2: Short Reels / TikTok / Shorts (30s)
-        if (lower.contains("reels") || lower.contains("tiktok") || lower.contains("shorts") || lower.contains("30 seg") || lower.contains("curto")) {
-            val script = """
-                === GANCHO DE 3 SEGUNDOS ===
-                [DICA]Olhar intenso para a lente, fala rápida e energética[/DICA]
-                Pare tudo por 30 segundos! Se você quer dominar [DESTAQUE]$topic[/DESTAQUE], precisa conhecer essa estratégia agora.
-                [PAUSA 2s]
-
-                === SEGREDO PRÁTICO ===
-                A maioria das pessoas erra porque complica demais. O segredo real de [DESTAQUE]$topic[/DESTAQUE] está em aplicar consistência, clareza e foco no que traz resultado imediato.
-                [PAUSA 2s]
-
-                === VIRADA DE CHAVE ===
-                [DICA]Aproximar levemente do enquadramento[/DICA]
-                [ALERTA]Teste isso hoje mesmo[/ALERTA] e veja a diferença na prática logo no primeiro dia!
-                [PAUSA 2s]
-
-                === CTA RÁPIDO ===
-                Salva esse vídeo para não esquecer e manda para quem precisa ver isso!
-            """.trimIndent()
-
-            return GeneratedScriptResult(
-                title = "Reels / Shorts: $topic",
-                explanation = "Criei um roteiro vertical rápido (aprox. 30–40 segundos) com **gancho forte de retenção** sobre **$topic**:",
-                scriptContent = script
-            )
-        }
-
-        // Case 3: Jornalismo / Notícia
-        if (lower.contains("jornal") || lower.contains("notícia") || lower.contains("noticia") || lower.contains("reportagem")) {
-            val script = """
-                === MANCHETE ===
-                [DICA]Postura formal, dicção clara e cadenciada[/DICA]
-                Olá, muito boa noite. Destaques de hoje: novas atualizações importantes sobre [DESTAQUE]$topic[/DESTAQUE] movimentam o cenário nacional.
-                [PAUSA 2s]
-
-                === DETALHAMENTO DOS FATOS ===
-                Especialistas apontam que o avanço de [DESTAQUE]$topic[/DESTAQUE] traz impactos diretos para profissionais e consumidores já nas próximas semanas.
-                [PAUSA 2s]
-
-                [DICA]Olhar firme, transição de entonação[/DICA]
-                [ALERTA]A recomendação principal é acompanhar os indicadores[/ALERTA] e se preparar para as novas oportunidades do setor.
-                [PAUSA 3s]
-
-                === ENCERRAMENTO ===
-                Continuamos acompanhando o caso em tempo real. Mais informações na nossa próxima edição.
-            """.trimIndent()
-
-            return GeneratedScriptResult(
-                title = "Boletim: $topic",
-                explanation = "Preparei uma lauda jornalística completa sobre **$topic** com marcações de pausa e entonação de bancada:",
-                scriptContent = script
-            )
-        }
-
-        // Case 4: Vendas / Comercial / Pitch
-        if (lower.contains("venda") || lower.contains("comercial") || lower.contains("anúncio") || lower.contains("anuncio") || lower.contains("pitch") || lower.contains("cliente")) {
-            val script = """
-                === CONEXÃO E DOR ===
-                [DICA]Tom empático, conversa olho no olho[/DICA]
-                Você sente que poderia alcançar resultados muito maiores com [DESTAQUE]$topic[/DESTAQUE], mas ainda perde tempo com processos lentos?
-                [PAUSA 2s]
-
-                === APRESENTAÇÃO DA SOLUÇÃO ===
-                Foi exatamente para resolver isso que desenvolvemos uma abordagem prática e direta para [DESTAQUE]$topic[/DESTAQUE].
-                Com ela, você ganha produtividade, segurança e previsibilidade desde o primeiro passo.
-                [PAUSA 2s]
-
-                === PROVA E BENEFÍCIO ===
-                [DICA]Sorriso confiante, ritmo firme[/DICA]
-                Mais de centenas de profissionais já transformaram sua rotina aplicando esse método simples.
-                [PAUSA 2s]
-
-                === CHAMADA DE AÇÃO (OFERTA) ===
-                [ALERTA]Toque no botão abaixo agora mesmo[/ALERTA] e fale com nossa equipe para garantir sua condição especial!
-            """.trimIndent()
-
-            return GeneratedScriptResult(
-                title = "Pitch Comercial: $topic",
-                explanation = "Estruturei um roteiro persuasivo no formato **Problema → Solução → Benefício → CTA** sobre **$topic**:",
-                scriptContent = script
-            )
-        }
-
-        // Default Case: Complete YouTube / Presentation / Class Script
         val script = """
             === ABERTURA & GANCHO ===
-            [DICA]Sorriso acolhedor, olhar fixo na lente da câmera[/DICA]
-            Fala pessoal, tudo bem com vocês? Hoje nós vamos mergulhar em um tema essencial: [DESTAQUE]$topic[/DESTAQUE].
+            [DICA]Olhar firme na lente da câmera, tom natural e seguro[/DICA]
+            Olá pessoal! Hoje vamos falar diretamente sobre: [DESTAQUE]$userRequest[/DESTAQUE].
             [PAUSA 2s]
 
-            Se você quer entender de forma prática e sem enrolação como dominar esse assunto, fica comigo até o final deste vídeo!
+            === DESENVOLVIMENTO PRINCIPAL ===
+            Quando analisamos esse tema na prática, percebemos que [ALERTA]a clareza e a objetividade na comunicação[/ALERTA] são fundamentais para conectar com quem está assistindo.
             [PAUSA 2s]
 
-            === 1. CONTEXTO E IMPORTÂNCIA ===
-            Para começar, vale entender por que [DESTAQUE]$topic[/DESTAQUE] se tornou tão importante.
-            Quando aplicamos os fundamentos certos, economizamos tempo e elevamos imediatamente a qualidade do nosso resultado.
+            [DICA]Mudar levemente a entonação para destacar os próximos pontos[/DICA]
+            Por isso, separei os pontos essenciais sobre [DESTAQUE]$topic[/DESTAQUE] para você aplicar imediatamente com segurança e resultado.
             [PAUSA 3s]
 
-            === 2. DICA PRÁTICA PASSO A PASSO ===
-            [DICA]Mudar levemente a entonação para destacar a dica principal[/DICA]
-            O ponto mais importante que você precisa lembrar é: [ALERTA]planejamento claro e execução consistente fazem toda a diferença[/ALERTA].
-            Comece definindo seu objetivo principal, organize as etapas e valide cada resultado com calma.
-            [PAUSA 3s]
-
-            === CONCLUSÃO E ENCERRAMENTO ===
-            Agora me conta aqui nos comentários: como você pretende aplicar [DESTAQUE]$topic[/DESTAQUE] no seu dia a dia?
-            [PAUSA 2s]
-
-            Não esqueça de deixar o seu gostei, se inscrever no canal e compartilhar este vídeo. Até o próximo episódio!
+            === ENCERRAMENTO & CHAMADA (CTA) ===
+            Se este conteúdo fez sentido para você, deixe seu comentário, compartilhe e inscreva-se para acompanhar os próximos vídeos!
         """.trimIndent()
 
         return GeneratedScriptResult(
             title = "Roteiro: $topic",
-            explanation = "Elaborei um roteiro completo sobre **$topic** já formatado com divisores de tópicos, dicas de câmera, destaques e pausas programadas:",
+            explanation = "Rascunho base estruturado para **$topic**:",
             scriptContent = script
         )
     }
@@ -462,4 +638,3 @@ class OnDeviceGeminiAssistant {
         }.ifBlank { "Produção de Estúdio" }
     }
 }
-

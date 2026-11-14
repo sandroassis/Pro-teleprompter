@@ -64,6 +64,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -73,10 +74,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.navigation3.runtime.NavKey
 import com.example.proteleprompter.About
 import com.example.proteleprompter.CloudBackup
@@ -85,6 +90,9 @@ import com.example.proteleprompter.GeminiAi
 import com.example.proteleprompter.Prompter
 import com.example.proteleprompter.RemoteControl
 import com.example.proteleprompter.StudioSettings
+import com.example.proteleprompter.ai.ExternalAiProvider
+import com.example.proteleprompter.ai.GeminiNanoStatus
+import com.example.proteleprompter.ai.InstalledAiAppsBridge
 import com.example.proteleprompter.data.Script
 import com.example.proteleprompter.data.ScriptParser
 import com.example.proteleprompter.ui.adaptive.ProTeleprompterBrandIcon
@@ -106,12 +114,58 @@ fun MainScreen(
     modifier: Modifier = Modifier,
     viewModel: MainScreenViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
 ) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val windowInfo = rememberAdaptiveWindowInfo()
     val state by viewModel.uiState.collectAsState()
     val bannerMessage by viewModel.statusBanner.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
 
+    val aiStatus by viewModel.geminiAssistant.status.collectAsState()
+    val installedAiApps by viewModel.geminiAssistant.installedApps.collectAsState()
+    val selectedAiApp by viewModel.geminiAssistant.selectedExternalApp.collectAsState()
+    val cloudApiKey by viewModel.geminiAssistant.cloudApiKey.collectAsState()
+
+    val hasAiReady = installedAiApps.isNotEmpty() ||
+        cloudApiKey.isNotBlank() ||
+        aiStatus == GeminiNanoStatus.AVAILABLE ||
+        aiStatus == GeminiNanoStatus.CLOUD_GEMINI_PRO
+
+    val activeAiShortLabel = when {
+        cloudApiKey.isNotBlank() -> "Gemini 2.5"
+        selectedAiApp != null -> selectedAiApp!!.displayName.replace("Google ", "")
+        installedAiApps.isNotEmpty() -> installedAiApps.first().displayName.replace("Google ", "")
+        aiStatus == GeminiNanoStatus.AVAILABLE -> "Gemini Nano"
+        else -> null
+    }
+
     var showNewFolderDialog by remember { mutableStateOf(false) }
+    var showInstallGeminiPromptDialog by remember { mutableStateOf(false) }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.geminiAssistant.refreshInstalledAppsAndConfig(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    val handleOpenAiClick: () -> Unit = {
+        viewModel.geminiAssistant.refreshInstalledAppsAndConfig(context)
+        val currentlyReady = viewModel.geminiAssistant.installedApps.value.isNotEmpty() ||
+            viewModel.geminiAssistant.cloudApiKey.value.isNotBlank() ||
+            viewModel.geminiAssistant.status.value == GeminiNanoStatus.AVAILABLE ||
+            viewModel.geminiAssistant.status.value == GeminiNanoStatus.CLOUD_GEMINI_PRO
+        if (currentlyReady) {
+            onItemClick(GeminiAi())
+        } else {
+            showInstallGeminiPromptDialog = true
+        }
+    }
 
     LaunchedEffect(bannerMessage) {
         val msg = bannerMessage
@@ -175,7 +229,11 @@ fun MainScreen(
                                     }
                                 }
                                 Text(
-                                    text = "Estúdio • Gemini Nano IA • Câmera & Voz",
+                                    text = if (activeAiShortLabel != null) {
+                                        "Estúdio • IA $activeAiShortLabel Ativa • Câmera & Voz"
+                                    } else {
+                                        "Estúdio • IA Gemini / ChatGPT / Claude • Câmera & Voz"
+                                    },
                                     style = MaterialTheme.typography.labelSmall,
                                     color = BroadcastCyan,
                                     maxLines = 1,
@@ -190,13 +248,13 @@ fun MainScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             IconButton(
-                                onClick = { onItemClick(GeminiAi()) },
+                                onClick = handleOpenAiClick,
                                 modifier = Modifier.size(38.dp)
                             ) {
                                 Icon(
                                     Icons.Default.AutoAwesome,
                                     contentDescription = "Tela IA Gemini",
-                                    tint = BroadcastAmber,
+                                    tint = if (hasAiReady) BroadcastAmber else Color(0xFF94A3B8),
                                     modifier = Modifier.size(20.dp)
                                 )
                             }
@@ -255,11 +313,19 @@ fun MainScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 ExtendedFloatingActionButton(
-                    onClick = { onItemClick(GeminiAi()) },
+                    onClick = handleOpenAiClick,
                     containerColor = StudioCard,
-                    contentColor = BroadcastAmber,
+                    contentColor = if (hasAiReady) BroadcastAmber else Color(0xFFF59E0B),
                     icon = { Icon(Icons.Default.AutoAwesome, contentDescription = null) },
-                    text = { Text("Criar com IA", fontWeight = FontWeight.Bold) }
+                    text = {
+                        Text(
+                            text = when {
+                                activeAiShortLabel != null -> "IA • $activeAiShortLabel"
+                                else -> "Habilitar IA (Gemini)"
+                            },
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 )
 
                 ExtendedFloatingActionButton(
@@ -288,7 +354,7 @@ fun MainScreen(
                     onSelectFolder = viewModel::selectFolder,
                     onToggleFavorites = viewModel::toggleOnlyFavorites,
                     onNewFolder = { showNewFolderDialog = true },
-                    onOpenGeminiAi = { onItemClick(GeminiAi()) },
+                    onOpenGeminiAi = handleOpenAiClick,
                     onOpenAbout = { onItemClick(About) },
                     modifier = Modifier
                         .width(if (windowInfo.isTvDevice) 240.dp else 210.dp)
@@ -527,6 +593,79 @@ fun MainScreen(
             dismissButton = {
                 TextButton(onClick = { showNewFolderDialog = false }) {
                     Text("Cancelar")
+                }
+            }
+        )
+    }
+
+    if (showInstallGeminiPromptDialog) {
+        AlertDialog(
+            onDismissRequest = { showInstallGeminiPromptDialog = false },
+            containerColor = StudioSurface,
+            title = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        Icons.Default.AutoAwesome,
+                        contentDescription = null,
+                        tint = BroadcastAmber
+                    )
+                    Text(
+                        "Habilitar IA Potência Total",
+                        color = Color.White,
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Nenhum aplicativo oficial de IA (Google Gemini, ChatGPT ou Claude) foi detectado instalado neste aparelho Android.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color(0xFFE2E8F0)
+                    )
+                    Text(
+                        text = "Para habilitar o botão de IA com máxima inteligência na geração de roteiros de Teleprompter, recomendamos instalar o aplicativo oficial Google Gemini (ou conectar uma chave gratuita Gemini 2.5 direto no Estúdio IA).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF94A3B8)
+                    )
+                    OutlinedButton(
+                        onClick = {
+                            showInstallGeminiPromptDialog = false
+                            onItemClick(GeminiAi())
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            "Abrir Estúdio IA / Configurar Chave Gemini 2.5",
+                            color = BroadcastCyan,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showInstallGeminiPromptDialog = false
+                        InstalledAiAppsBridge.openPlayStoreToInstall(
+                            context,
+                            ExternalAiProvider.GOOGLE_GEMINI
+                        )
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = BroadcastAmber,
+                        contentColor = Color(0xFF1A1200)
+                    )
+                ) {
+                    Text("📲 Baixar App Google Gemini", fontWeight = FontWeight.ExtraBold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showInstallGeminiPromptDialog = false }) {
+                    Text("Fechar", color = Color.Gray)
                 }
             }
         )
